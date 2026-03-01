@@ -1,0 +1,12 @@
+{
+    "extends": "@tsconfig/node20/tsconfig.json",
+    "compilerOptions": {
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "esModuleInterop": true,
+        "resolveJsonModule": true
+    },
+    "include": [
+        "src/**/*"
+    ]
+}

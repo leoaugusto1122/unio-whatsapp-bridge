@@ -1,0 +1,50 @@
+import { Router } from 'express';
+import { connectInstance, getInstanceStatus, disconnectInstance } from '../services/baileys';
+
+const router = Router();
+
+router.post('/connect', async (req, res) => {
+    try {
+        const { churchId, phoneNumber } = req.body;
+        if (!churchId || !phoneNumber) {
+            return res.status(400).json({ error: 'churchId and phoneNumber are required' });
+        }
+
+        // Normalize string beforehand
+        const digits = phoneNumber.replace(/\D/g, '');
+        let finalPhone = digits;
+        if (!finalPhone.startsWith('55')) {
+            finalPhone = '55' + finalPhone;
+        }
+
+        const result = await connectInstance(churchId, finalPhone);
+        res.json(result);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message || 'Internal Server Error' });
+    }
+});
+
+router.get('/status/:churchId', async (req, res) => {
+    try {
+        const { churchId } = req.params;
+        const result = await getInstanceStatus(churchId);
+        res.json(result);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+router.post('/disconnect', async (req, res) => {
+    try {
+        const { churchId } = req.body;
+        if (!churchId) {
+            return res.status(400).json({ error: 'churchId is required' });
+        }
+        const result = await disconnectInstance(churchId);
+        res.json(result);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+export default router;
