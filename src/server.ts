@@ -7,7 +7,9 @@ import sendRoutes from './routes/send';
 import healthRoutes from './routes/health';
 import { startScheduler } from './services/scheduler';
 
-dotenv.config();
+if (process.env.NODE_ENV !== 'production') {
+    dotenv.config();
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;

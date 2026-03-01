@@ -1,6 +1,9 @@
 import admin from 'firebase-admin';
 import dotenv from 'dotenv';
-dotenv.config();
+
+if (process.env.NODE_ENV !== 'production') {
+    dotenv.config();
+}
 
 if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_SERVICE_ACCOUNT) {
     try {
