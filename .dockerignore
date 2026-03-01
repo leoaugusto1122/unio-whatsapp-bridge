@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.git/
+.env
+.DS_Store
+*.log
+sessions/
+b4a-test/
+test-mcp.js
+test-mcp2.js
+help.txt
+help2.txt

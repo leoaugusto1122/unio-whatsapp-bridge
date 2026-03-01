@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:20
 
 WORKDIR /app
 
@@ -7,23 +7,16 @@ ENV SESSIONS_DIR=/app/sessions
 
 COPY package*.json ./
 
-# Install all dependencies (including dev) to allow build
+# Setup cleanly
 RUN npm install
 
 COPY . .
 
-# Build step
+# Build the project
 RUN npm run build
 
-# Prune devDependencies to keep container size small
+# Remove development dependencies
 RUN npm prune --omit=dev
-
-# Create sessions directory and enforce permission specifically for it
-RUN mkdir -p /app/sessions && chown node:node /app/sessions
-
-# Back4app might have issues with strict USER directives during volume mounts if not previously created correctly,
-# but we'll keep USER node for safety.
-USER node
 
 EXPOSE 3000
 
