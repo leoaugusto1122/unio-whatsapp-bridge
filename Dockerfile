@@ -1,24 +1,30 @@
-# Estágio de build
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-RUN npm prune --omit=dev
-
-# Estágio de produção
 FROM node:20-alpine
+
 WORKDIR /app
+
 ENV NODE_ENV=production
 ENV SESSIONS_DIR=/app/sessions
-RUN mkdir -p /app/sessions && chown node:node /app/sessions
-COPY --chown=node:node --from=builder /app/package*.json ./
-COPY --chown=node:node --from=builder /app/node_modules ./node_modules
-COPY --chown=node:node --from=builder /app/dist ./dist
 
+COPY package*.json ./
+
+# Install all dependencies (including dev) to allow build
+RUN npm install
+
+COPY . .
+
+# Build step
+RUN npm run build
+
+# Prune devDependencies to keep container size small
+RUN npm prune --omit=dev
+
+# Create sessions directory and enforce permission specifically for it
+RUN mkdir -p /app/sessions && chown node:node /app/sessions
+
+# Back4app might have issues with strict USER directives during volume mounts if not previously created correctly,
+# but we'll keep USER node for safety.
 USER node
+
 EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
 
 CMD ["npm", "start"]
