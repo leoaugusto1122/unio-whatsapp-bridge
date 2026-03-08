@@ -17,8 +17,26 @@ interface InstanceData {
     connectedSince: string;
 }
 
+interface ConnectingInstanceData {
+    sock: WASocket;
+    phoneNumber?: string;
+    sessionsDir: string;
+    startedAt: string;
+    attemptId: string;
+}
+
+type ConnectOptions = {
+    /**
+     * When an instance is already "connecting":
+     * - "return": keep existing attempt & return { status: 'connecting' }
+     * - "reset": destroy socket, wipe session dir, start a fresh connection
+     */
+    ifConnecting?: 'return' | 'reset';
+};
+
 const instances = new Map<string, InstanceData>();
-const connectingInstances = new Set<string>();
+const connectingInstances = new Map<string, ConnectingInstanceData>();
+const churchQueues = new Map<string, Promise<unknown>>();
 const logger = pino({ level: 'silent' });
 
 export function normalizeToJid(phone: string) {
@@ -35,73 +53,145 @@ async function isOnWhatsApp(sock: WASocket, jid: string) {
     return !!entry?.exists;
 }
 
-export async function connectInstance(churchId: string, phoneNumber?: string) {
-    if (instances.has(churchId)) {
-        return { status: 'connected', phoneNumber };
-    }
+function runExclusive<T>(churchId: string, task: () => Promise<T>) {
+    const prev = churchQueues.get(churchId) ?? Promise.resolve();
+    const next = prev.then(task, task);
+    churchQueues.set(
+        churchId,
+        next.finally(() => {
+            if (churchQueues.get(churchId) === next) {
+                churchQueues.delete(churchId);
+            }
+        })
+    );
+    return next;
+}
 
-    if (connectingInstances.has(churchId)) {
-        return { status: 'connecting', phoneNumber };
-    }
+function isCurrentSock(churchId: string, sock: WASocket) {
+    return instances.get(churchId)?.sock === sock || connectingInstances.get(churchId)?.sock === sock;
+}
 
-    connectingInstances.add(churchId);
+function destroySock(sock: WASocket, reason: string) {
+    try {
+        sock.end(new Error(reason));
+    } catch { }
+    try {
+        sock.ws.close();
+    } catch { }
+}
 
-    const sessionsDir = getSessionsDir();
-    const { state, saveCreds } = await useCustomFileAuthState(churchId, sessionsDir);
+async function resetConnectingInstance(churchId: string) {
+    const connecting = connectingInstances.get(churchId);
+    if (!connecting) return false;
 
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false,
-        logger,
-        syncFullHistory: false,
-        markOnlineOnConnect: false
-    });
+    connectingInstances.delete(churchId);
+    destroySock(connecting.sock, 'connecting_instance_reset');
+    await clearSession(churchId, connecting.sessionsDir);
+    return true;
+}
 
-    sock.ev.on('creds.update', saveCreds);
+function makeAttemptId() {
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
+export async function connectInstance(churchId: string, phoneNumber?: string, options: ConnectOptions = {}) {
+    return runExclusive(churchId, async () => {
+        if (instances.has(churchId)) {
+            const data = instances.get(churchId);
+            return { status: 'connected', phoneNumber: data?.phoneNumber };
+        }
 
-        if (connection === 'open') {
-            instances.set(churchId, {
-                sock,
-                phoneNumber,
-                connectedSince: new Date().toISOString()
-            });
-            connectingInstances.delete(churchId);
-        } else if (connection === 'close') {
-            const error = (lastDisconnect?.error as Boom)?.output?.statusCode;
-            const shouldReconnect = error !== DisconnectReason.loggedOut;
-
-            instances.delete(churchId);
-
-            if (shouldReconnect) {
-                // try to reconnect
-                setTimeout(() => connectInstance(churchId, phoneNumber), 5000);
+        const ifConnecting = options.ifConnecting ?? 'return';
+        if (connectingInstances.has(churchId)) {
+            if (ifConnecting === 'reset') {
+                await resetConnectingInstance(churchId);
             } else {
-                connectingInstances.delete(churchId);
-                clearSession(churchId, sessionsDir);
+                return { status: 'connecting', phoneNumber: connectingInstances.get(churchId)?.phoneNumber };
             }
         }
-    });
 
-    if (!sock.authState.creds.registered) {
-        if (!phoneNumber) {
-            connectingInstances.delete(churchId);
-            throw new Error('phone_required_for_pairing');
+        const sessionsDir = getSessionsDir();
+        const { state, saveCreds } = await useCustomFileAuthState(churchId, sessionsDir);
+
+        const sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: false,
+            logger,
+            syncFullHistory: false,
+            markOnlineOnConnect: false
+        });
+
+        const attemptId = makeAttemptId();
+        connectingInstances.set(churchId, {
+            sock,
+            phoneNumber,
+            sessionsDir,
+            startedAt: new Date().toISOString(),
+            attemptId
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect } = update;
+
+            if (!isCurrentSock(churchId, sock)) {
+                return;
+            }
+
+            if (connection === 'open') {
+                const current = connectingInstances.get(churchId);
+                if (current?.attemptId === attemptId) {
+                    instances.set(churchId, {
+                        sock,
+                        phoneNumber: current.phoneNumber,
+                        connectedSince: new Date().toISOString()
+                    });
+                    connectingInstances.delete(churchId);
+                }
+            } else if (connection === 'close') {
+                const error = (lastDisconnect?.error as Boom)?.output?.statusCode;
+                const shouldReconnect = error !== DisconnectReason.loggedOut;
+
+                if (instances.get(churchId)?.sock === sock) {
+                    instances.delete(churchId);
+                }
+                if (connectingInstances.get(churchId)?.sock === sock) {
+                    connectingInstances.delete(churchId);
+                }
+
+                if (shouldReconnect) {
+                    setTimeout(() => connectInstance(churchId, phoneNumber), 5000);
+                } else {
+                    clearSession(churchId, sessionsDir);
+                }
+            }
+        });
+
+        if (!sock.authState.creds.registered) {
+            if (!phoneNumber) {
+                if (connectingInstances.get(churchId)?.sock === sock) {
+                    connectingInstances.delete(churchId);
+                }
+                destroySock(sock, 'phone_required_for_pairing');
+                throw new Error('phone_required_for_pairing');
+            }
+            // Small delay as recommended when requesting pairing code
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            try {
+                const code = await sock.requestPairingCode(phoneNumber);
+                return { status: 'pending', pairingCode: code, expiresIn: 60 };
+            } catch (error) {
+                if (connectingInstances.get(churchId)?.sock === sock) {
+                    connectingInstances.delete(churchId);
+                }
+                destroySock(sock, 'pairing_code_request_failed');
+                throw error;
+            }
         }
-        // Small delay as recommended when requesting pairing code
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        try {
-            const code = await sock.requestPairingCode(phoneNumber);
-            return { status: 'pending', pairingCode: code, expiresIn: 60 };
-        } catch (error) {
-            connectingInstances.delete(churchId);
-            throw error;
-        }
-    } else {
+
         return { status: 'connecting', phoneNumber };
-    }
+    });
 }
 
 export async function getInstanceStatus(churchId: string) {
@@ -115,20 +205,32 @@ export async function getInstanceStatus(churchId: string) {
         };
     }
     if (connectingInstances.has(churchId)) {
-        return { churchId, status: 'connecting' };
+        const data = connectingInstances.get(churchId);
+        return { churchId, status: 'connecting', phoneNumber: data?.phoneNumber, startedAt: data?.startedAt };
     }
     return { churchId, status: 'disconnected' };
 }
 
 export async function disconnectInstance(churchId: string) {
-    if (instances.has(churchId)) {
-        const { sock } = instances.get(churchId)!;
-        sock.logout();
-        instances.delete(churchId);
-    }
-    connectingInstances.delete(churchId);
-    await clearSession(churchId, getSessionsDir());
-    return { status: 'disconnected', churchId };
+    return runExclusive(churchId, async () => {
+        const connected = instances.get(churchId);
+        if (connected) {
+            try {
+                connected.sock.logout();
+            } catch { }
+            destroySock(connected.sock, 'disconnect_requested');
+            instances.delete(churchId);
+        }
+
+        const connecting = connectingInstances.get(churchId);
+        if (connecting) {
+            connectingInstances.delete(churchId);
+            destroySock(connecting.sock, 'disconnect_requested');
+        }
+
+        await clearSession(churchId, getSessionsDir());
+        return { status: 'disconnected', churchId };
+    });
 }
 
 export async function sendIndividualMessage(churchId: string, to: string, message: string) {

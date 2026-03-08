@@ -12,7 +12,7 @@ router.post('/connect', async (req, res) => {
         }
 
         const finalPhone = normalizePhoneDigits(phoneNumber);
-        const result = await connectInstance(churchId, finalPhone);
+        const result = await connectInstance(churchId, finalPhone, { ifConnecting: 'reset' });
         res.json(result);
     } catch (error: any) {
         if (error instanceof PhoneValidationError) {
