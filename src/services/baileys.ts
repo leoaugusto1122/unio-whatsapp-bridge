@@ -203,6 +203,10 @@ export async function connectInstance(churchId: string, options: ConnectOptions 
             } else if (connection === 'close') {
                 const error = (lastDisconnect?.error as Boom)?.output?.statusCode;
                 const shouldReconnect = error !== DisconnectReason.loggedOut;
+                const shouldClearSession =
+                    error === DisconnectReason.loggedOut ||
+                    error === DisconnectReason.badSession ||
+                    error === DisconnectReason.multideviceMismatch;
 
                 if (instances.get(churchId)?.sock === sock) {
                     instances.delete(churchId);
@@ -211,14 +215,16 @@ export async function connectInstance(churchId: string, options: ConnectOptions 
                     connectingInstances.delete(churchId);
                 }
 
+                if (shouldClearSession) {
+                    void clearSession(churchId, sessionsDir);
+                }
+
                 if (shouldReconnect) {
                     setTimeout(() => {
                         void connectInstance(churchId).catch(err => {
                             console.error(`Reconnect failed for church ${churchId}:`, err);
                         });
                     }, 5000);
-                } else {
-                    clearSession(churchId, sessionsDir);
                 }
             }
         });
