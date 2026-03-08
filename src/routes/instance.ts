@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { connectInstance, getInstanceStatus, disconnectInstance } from '../services/baileys';
+import { normalizePhoneDigits, PhoneValidationError } from '../utils/phone';
 
 const router = Router();
 
@@ -10,16 +11,13 @@ router.post('/connect', async (req, res) => {
             return res.status(400).json({ error: 'churchId and phoneNumber are required' });
         }
 
-        // Normalize string beforehand
-        const digits = phoneNumber.replace(/\D/g, '');
-        let finalPhone = digits;
-        if (!finalPhone.startsWith('55')) {
-            finalPhone = '55' + finalPhone;
-        }
-
+        const finalPhone = normalizePhoneDigits(phoneNumber);
         const result = await connectInstance(churchId, finalPhone);
         res.json(result);
     } catch (error: any) {
+        if (error instanceof PhoneValidationError) {
+            return res.status(400).json({ error: error.code, message: error.message });
+        }
         res.status(500).json({ error: error.message || 'Internal Server Error' });
     }
 });

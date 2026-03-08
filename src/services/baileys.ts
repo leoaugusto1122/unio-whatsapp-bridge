@@ -3,8 +3,13 @@ import { useCustomFileAuthState, clearSession } from './session';
 import path from 'path';
 import pino from 'pino';
 import { Boom } from '@hapi/boom';
+import fs from 'fs/promises';
+import { normalizePhoneToJid, PhoneValidationError } from '../utils/phone';
 
-const SESSIONS_DIR = process.env.SESSIONS_DIR || path.join(__dirname, '../../sessions');
+const DEFAULT_SESSIONS_DIR = path.join(__dirname, '../../sessions');
+function getSessionsDir() {
+    return process.env.SESSIONS_DIR || DEFAULT_SESSIONS_DIR;
+}
 
 interface InstanceData {
     sock: WASocket;
@@ -17,19 +22,20 @@ const connectingInstances = new Set<string>();
 const logger = pino({ level: 'silent' });
 
 export function normalizeToJid(phone: string) {
-    const digits = phone.replace(/\D/g, '');
-    let finalPhone = digits;
-    if (!finalPhone.startsWith('55')) {
-        finalPhone = '55' + finalPhone;
-    }
-    return `${finalPhone}@s.whatsapp.net`;
+    return normalizePhoneToJid(phone).jid;
 }
 
 export function getConnectedInstancesCount() {
     return instances.size;
 }
 
-export async function connectInstance(churchId: string, phoneNumber: string) {
+async function isOnWhatsApp(sock: WASocket, jid: string) {
+    const result = await sock.onWhatsApp(jid);
+    const entry = Array.isArray(result) ? result[0] : null;
+    return !!entry?.exists;
+}
+
+export async function connectInstance(churchId: string, phoneNumber?: string) {
     if (instances.has(churchId)) {
         return { status: 'connected', phoneNumber };
     }
@@ -40,7 +46,8 @@ export async function connectInstance(churchId: string, phoneNumber: string) {
 
     connectingInstances.add(churchId);
 
-    const { state, saveCreds } = await useCustomFileAuthState(churchId, SESSIONS_DIR);
+    const sessionsDir = getSessionsDir();
+    const { state, saveCreds } = await useCustomFileAuthState(churchId, sessionsDir);
 
     const sock = makeWASocket({
         auth: state,
@@ -73,12 +80,16 @@ export async function connectInstance(churchId: string, phoneNumber: string) {
                 setTimeout(() => connectInstance(churchId, phoneNumber), 5000);
             } else {
                 connectingInstances.delete(churchId);
-                clearSession(churchId, SESSIONS_DIR);
+                clearSession(churchId, sessionsDir);
             }
         }
     });
 
     if (!sock.authState.creds.registered) {
+        if (!phoneNumber) {
+            connectingInstances.delete(churchId);
+            throw new Error('phone_required_for_pairing');
+        }
         // Small delay as recommended when requesting pairing code
         await new Promise(resolve => setTimeout(resolve, 1500));
         try {
@@ -116,7 +127,7 @@ export async function disconnectInstance(churchId: string) {
         instances.delete(churchId);
     }
     connectingInstances.delete(churchId);
-    await clearSession(churchId, SESSIONS_DIR);
+    await clearSession(churchId, getSessionsDir());
     return { status: 'disconnected', churchId };
 }
 
@@ -126,9 +137,26 @@ export async function sendIndividualMessage(churchId: string, to: string, messag
         return { status: 'failed', reason: 'instance_disconnected', message: `A instância da igreja ${churchId} não está conectada` };
     }
 
-    const jid = normalizeToJid(to);
+    let jid: string;
+    try {
+        jid = normalizePhoneToJid(to).jid;
+    } catch (error) {
+        if (error instanceof PhoneValidationError) {
+            return { status: 'failed', reason: error.code, message: error.message };
+        }
+        return { status: 'failed', reason: 'telefone_invalido', message: 'Telefone inválido.' };
+    }
 
     try {
+        try {
+            const exists = await isOnWhatsApp(data.sock, jid);
+            if (!exists) {
+                return { status: 'failed', reason: 'numero_invalido', message: 'Número inválido ou inexistente no WhatsApp.' };
+            }
+        } catch (error) {
+            console.warn('onWhatsApp verification failed, proceeding with send:', error);
+        }
+
         await data.sock.sendMessage(jid, { text: message });
         return { status: 'sent', to: jid, timestamp: new Date().toISOString() };
     } catch (error: any) {
@@ -149,23 +177,64 @@ export async function sendBatchMessages(churchId: string, messages: { to: string
     let failed = 0;
     const results = [];
 
-    for (const item of messages) {
-        const jid = normalizeToJid(item.to);
+    for (let idx = 0; idx < messages.length; idx++) {
+        const item = messages[idx];
+        let jid: string;
         try {
+            jid = normalizePhoneToJid(item.to).jid;
+        } catch (error) {
+            const reason = error instanceof PhoneValidationError ? error.code : 'telefone_invalido';
+            results.push({ to: item.to, status: 'failed', failReason: reason });
+            failed++;
+            continue;
+        }
+
+        try {
+            try {
+                const exists = await isOnWhatsApp(sock, jid);
+                if (!exists) {
+                    results.push({ to: item.to, status: 'failed', failReason: 'numero_invalido' });
+                    failed++;
+                    continue;
+                }
+            } catch (error) {
+                console.warn('onWhatsApp verification failed, proceeding with send:', error);
+            }
+
             await sock.sendMessage(jid, { text: item.message });
             results.push({ to: item.to, status: 'sent', failReason: null });
             sent++;
-
-            if (sent + failed < messages.length) {
-                // Random delay between 15s and 45s
-                const randomDelay = Math.floor(Math.random() * (45000 - 15000 + 1)) + 15000;
-                await delay(randomDelay);
-            }
         } catch (error: any) {
             results.push({ to: item.to, status: 'failed', failReason: error.message });
             failed++;
+        } finally {
+            // Random delay between 15s and 45s (only between actual send attempts)
+            if (idx < messages.length - 1) {
+                const randomDelay = Math.floor(Math.random() * (45000 - 15000 + 1)) + 15000;
+                await delay(randomDelay);
+            }
         }
     }
 
     return { total: messages.length, sent, failed, results };
+}
+
+export async function bootstrapInstancesFromSessions() {
+    const sessionsDir = getSessionsDir();
+    try {
+        const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
+        const churchIds = entries.filter(e => e.isDirectory()).map(e => e.name);
+
+        for (const churchId of churchIds) {
+            try {
+                const { state } = await useCustomFileAuthState(churchId, sessionsDir);
+                if (!state.creds.registered) continue;
+                await connectInstance(churchId);
+            } catch (error) {
+                console.error(`Failed to bootstrap instance for church ${churchId}:`, error);
+            }
+        }
+    } catch (error) {
+        console.warn(`No sessions to bootstrap (dir=${sessionsDir})`, error);
+    }
 }

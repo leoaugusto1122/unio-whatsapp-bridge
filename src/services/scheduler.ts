@@ -3,39 +3,63 @@ import { db } from './firestore';
 import { getInstanceStatus, sendBatchMessages } from './baileys';
 import * as admin from 'firebase-admin';
 
-const SCHEDULER_INTERVAL = process.env.SCHEDULER_INTERVAL || '60';
+const DEFAULT_INTERVAL_MINUTES = 60;
+const DEFAULT_ADVANCE_HOURS = 24;
+const DEFAULT_SILENCE_START = '22:00';
+const DEFAULT_SILENCE_END = '07:00';
+function getTimeZone() {
+    return process.env.TZ || 'America/Sao_Paulo';
+}
 
-export function startScheduler() {
-    console.log(`Starting scheduler with interval of ${SCHEDULER_INTERVAL} minutes`);
+let jobRunning = false;
 
-    // Convert configuration into valid cron (every X minutes)
-    const expression = `*/${SCHEDULER_INTERVAL} * * * *`;
+function parseIntervalMinutes(raw: string | undefined) {
+    const parsed = Number.parseInt(raw || '', 10);
+    if (!Number.isFinite(parsed)) return DEFAULT_INTERVAL_MINUTES;
+    if (parsed === 60) return 60;
+    if (parsed >= 1 && parsed <= 59) return parsed;
+    return DEFAULT_INTERVAL_MINUTES;
+}
 
-    cron.schedule(expression, async () => {
-        console.log('Running scheduled job for WhatsApp automation');
-        await runBatchJob();
+function toCronExpression(intervalMinutes: number) {
+    if (intervalMinutes === 60) return '0 * * * *';
+    return `*/${intervalMinutes} * * * *`;
+}
+
+function capitalizeFirst(text: string) {
+    if (!text) return text;
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function getCurrentMinutesInTimeZone(timeZone: string) {
+    const formatter = new Intl.DateTimeFormat('pt-BR', {
+        timeZone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
     });
+
+    const parts = formatter.formatToParts(new Date());
+    const hour = Number(parts.find(p => p.type === 'hour')?.value || '0');
+    const minute = Number(parts.find(p => p.type === 'minute')?.value || '0');
+    return hour * 60 + minute;
 }
 
-function calculateIfInAdvanceHours(cultDataHora: any, advanceHours: number) {
-    if (!cultDataHora) return false;
-    const cultTime = cultDataHora.toDate().getTime();
-    const targetTime = cultTime - (advanceHours * 60 * 60 * 1000);
-    const now = Date.now();
-    return targetTime <= now;
+function parseMinutes(hhmm: string) {
+    const [hStr, mStr] = (hhmm || '').split(':');
+    const h = Number(hStr);
+    const m = Number(mStr);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+    if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return h * 60 + m;
 }
 
-function isInsideSilenceWindow(silenceStart: string, silenceEnd: string) {
-    if (!silenceStart || !silenceEnd) return false;
+function isInsideSilenceWindow(silenceStart: string, silenceEnd: string, timeZone: string) {
+    const startMinutes = parseMinutes(silenceStart);
+    const endMinutes = parseMinutes(silenceEnd);
+    if (startMinutes === null || endMinutes === null) return false;
 
-    const now = new Date();
-    const currentMinutes = now.getHours() * 60 + now.getMinutes();
-
-    let [startH, startM] = silenceStart.split(':').map(Number);
-    let [endH, endM] = silenceEnd.split(':').map(Number);
-
-    const startMinutes = (startH || 0) * 60 + (startM || 0);
-    const endMinutes = (endH || 0) * 60 + (endM || 0);
+    const currentMinutes = getCurrentMinutesInTimeZone(timeZone);
 
     if (startMinutes < endMinutes) {
         return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
@@ -44,123 +68,198 @@ function isInsideSilenceWindow(silenceStart: string, silenceEnd: string) {
     }
 }
 
-function formatMessage(name: string, churchName: string, cultName: string, cultDate: Date, role: string, token: string) {
-    const days = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
-    const diaSemana = days[cultDate.getDay()];
-    const dateFormatted = cultDate.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '');
+function isInsideAdvanceWindow(cultDataHora: any, advanceHours: number) {
+    if (!cultDataHora?.toDate) return false;
+    const cultTimeMs = cultDataHora.toDate().getTime();
+    const startMs = cultTimeMs - (advanceHours * 60 * 60 * 1000);
+    const nowMs = Date.now();
+    return nowMs >= startMs && nowMs <= cultTimeMs;
+}
 
-    return `Olá ${name}, a Paz do Senhor! 👋
+function formatAutoMessage(params: {
+    nomeDoMembro: string;
+    nomeIgreja: string;
+    nomeCulto: string;
+    nomeEscala: string;
+    dataHoraCulto: Date;
+    setor: string;
+    token: string;
+    timeZone: string;
+}) {
+    const diaSemana = capitalizeFirst(params.dataHoraCulto.toLocaleDateString('pt-BR', { weekday: 'long', timeZone: params.timeZone }));
+    const data = params.dataHoraCulto.toLocaleDateString('pt-BR', { timeZone: params.timeZone });
+    const horario = params.dataHoraCulto.toLocaleTimeString('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+        timeZone: params.timeZone
+    });
+    const linkConfirmacao = `https://unioescala.web.app/confirmar?token=${params.token}`;
 
+    return `Olá, ${params.nomeDoMembro}.
 Você está escalado(a) para:
-🏛️ ${churchName}
-📅 ${cultName} — ${diaSemana}, ${dateFormatted}
-📋 Função: ${role}
+${params.nomeIgreja}
+🏢 Evento: ${params.nomeCulto}
+📝 Escala: ${params.nomeEscala}
+📅 Data: ${diaSemana}, ${data}
+⏰ Horário: ${horario}
+📍Função: ${params.setor}
+✅ Confirme sua presença pelo link abaixo:
+${linkConfirmacao}
+Obrigado!`;
+}
 
-Confirme sua presença pelo link abaixo:
-🔗 https://unioescala.web.app/confirmar?token=${token}
+export function startScheduler() {
+    const intervalMinutes = parseIntervalMinutes(process.env.SCHEDULER_INTERVAL);
+    const expression = toCronExpression(intervalMinutes);
+    const timeZone = getTimeZone();
 
-Obrigado! 🙏`;
+    console.log(`Starting scheduler with interval of ${intervalMinutes} minutes (cron="${expression}", tz="${timeZone}")`);
+
+    cron.schedule(expression, async () => {
+        if (jobRunning) {
+            console.log('Scheduled job already running; skipping this tick.');
+            return;
+        }
+
+        jobRunning = true;
+        try {
+            console.log('Running scheduled job for WhatsApp automation');
+            await runBatchJob();
+        } finally {
+            jobRunning = false;
+        }
+    }, { timezone: timeZone } as any);
 }
 
 async function runBatchJob() {
     if (!db) return;
 
     try {
-        const churchesSnapshot = await db.collection('igrejas').get();
+        let churchDocs: any[] = [];
+        const timeZone = getTimeZone();
 
-        for (const doc of churchesSnapshot.docs) {
-            const data = doc.data();
-            const config = data.whatsappAutomation || {};
+        try {
+            const snapshot = await db.collection('igrejas')
+                .where('whatsappAutomation.enabled', '==', true)
+                .where('whatsappAutomation.connected', '==', true)
+                .get();
+            churchDocs = snapshot.docs;
+        } catch (error) {
+            console.warn('Eligible churches query failed; falling back to full scan:', error);
+            const snapshot = await db.collection('igrejas').get();
+            churchDocs = snapshot.docs.filter((doc: any) => {
+                const data = doc.data();
+                const config = data?.whatsappAutomation || {};
+                return config.enabled === true && config.connected === true;
+            });
+        }
 
-            if (config.enabled && config.connected) {
-                const churchId = doc.id;
+        for (const doc of churchDocs) {
+            const churchId = doc.id;
+            const churchData = doc.data();
+            const config = churchData?.whatsappAutomation || {};
 
-                const status = await getInstanceStatus(churchId);
-                if (status.status !== 'connected') {
-                    console.log(`Church ${churchId} disconnected. Job skipped.`);
-                    continue;
-                }
+            const status = await getInstanceStatus(churchId);
+            if (status.status !== 'connected') {
+                console.log(`Church ${churchId} disconnected. Job skipped.`);
+                continue;
+            }
 
-                const advanceHours = config.advanceHours || 24;
-                const silenceStart = config.silenceStart;
-                const silenceEnd = config.silenceEnd;
+            const advanceHours = config.advanceHours || DEFAULT_ADVANCE_HOURS;
+            const silenceStart = config.silenceStart || DEFAULT_SILENCE_START;
+            const silenceEnd = config.silenceEnd || DEFAULT_SILENCE_END;
 
-                if (isInsideSilenceWindow(silenceStart, silenceEnd)) {
-                    console.log(`Church ${churchId} in silence window.`);
-                    continue;
-                }
+            if (isInsideSilenceWindow(silenceStart, silenceEnd, timeZone)) {
+                console.log(`Church ${churchId} in silence window.`);
+                continue;
+            }
 
-                // Query root collection `escalas` pointing to this churchId, assuming denormalized structure
-                // Fallback to subcollection if you prefer. Using root is more common when querying across or specific.
-                // It specifies 'Membro dentro de uma escala' implying subcollection or array. Let's assume nested.
-                const escalasSnapshot = await db.collection(`igrejas/${churchId}/escalas`)
-                    .where('status', '==', 'publicada')
+            const escalasSnapshot = await db.collection(`igrejas/${churchId}/escalas`)
+                .where('status', '==', 'publicada')
+                .get();
+
+            for (const escalaDoc of escalasSnapshot.docs) {
+                const escala = escalaDoc.data();
+
+                if (!isInsideAdvanceWindow(escala.dataHoraCulto, advanceHours)) continue;
+
+                const itemsSnapshot = await db.collection(`igrejas/${churchId}/escalas/${escalaDoc.id}/items`)
+                    .where('notificado', '==', false)
                     .get();
 
-                for (const escalaDoc of escalasSnapshot.docs) {
-                    const escala = escalaDoc.data();
+                if (itemsSnapshot.empty) continue;
 
-                    if (!calculateIfInAdvanceHours(escala.dataHoraCulto, advanceHours)) {
+                const nomeIgreja = escala.nomeIgreja || churchData.nome || 'Igreja';
+                const nomeCulto = escala.nomeCulto || 'Culto';
+                const nomeEscala = escala.nome || escala.nomeEscala || nomeCulto;
+
+                const batchToaster: { to: string, message: string }[] = [];
+                const itemDocsList: any[] = [];
+
+                for (const itemDoc of itemsSnapshot.docs) {
+                    const item = itemDoc.data();
+
+                    if (!item.telefone) {
+                        if (item.notificadoErro !== 'sem_telefone') {
+                            await itemDoc.ref.update({ notificado: false, notificadoErro: 'sem_telefone' });
+                        }
                         continue;
                     }
 
-                    const membrosSnapshot = await db.collection(`igrejas/${churchId}/escalas/${escalaDoc.id}/membros`)
-                        .where('notificado', '==', false)
-                        .get();
+                    if (!item.token) {
+                        if (item.notificadoErro !== 'send_error') {
+                            await itemDoc.ref.update({ notificado: false, notificadoErro: 'send_error' });
+                        }
+                        continue;
+                    }
 
-                    if (membrosSnapshot.empty) continue;
+                    const msg = formatAutoMessage({
+                        nomeDoMembro: item.nomeDoMembro || 'Membro',
+                        nomeIgreja,
+                        nomeCulto,
+                        nomeEscala,
+                        dataHoraCulto: escala.dataHoraCulto.toDate(),
+                        setor: item.setor || '',
+                        token: item.token,
+                        timeZone
+                    });
 
-                    const batchToaster = [];
-                    const memberDocsList = [];
+                    batchToaster.push({ to: item.telefone, message: msg });
+                    itemDocsList.push(itemDoc);
+                }
 
-                    for (const membroDoc of membrosSnapshot.docs) {
-                        const membro = membroDoc.data();
+                if (batchToaster.length === 0) continue;
 
-                        if (!membro.telefone) {
-                            await membroDoc.ref.update({
-                                notificado: false,
-                                notificadoErro: 'sem_telefone'
+                try {
+                    const result = await sendBatchMessages(churchId, batchToaster);
+
+                    for (let i = 0; i < batchToaster.length; i++) {
+                        const sendResult = result.results[i];
+                        const docRef = itemDocsList[i].ref;
+
+                        if (sendResult.status === 'sent') {
+                            await docRef.update({
+                                notificado: true,
+                                notificadoEm: admin.firestore.FieldValue.serverTimestamp(),
+                                notificadoErro: null
                             });
                             continue;
                         }
 
-                        const msg = formatMessage(
-                            membro.nomeDoMembro,
-                            escala.nomeIgreja || data.nome || 'Igreja',
-                            escala.nomeCulto,
-                            escala.dataHoraCulto.toDate(),
-                            membro.setor,
-                            membro.token
-                        );
+                        const failReason = String(sendResult.failReason || '');
+                        const mappedError =
+                            failReason === 'numero_invalido' || failReason === 'telefone_invalido'
+                                ? 'numero_invalido'
+                                : 'send_error';
 
-                        batchToaster.push({ to: membro.telefone, message: msg });
-                        memberDocsList.push(membroDoc);
+                        await docRef.update({
+                            notificado: false,
+                            notificadoErro: mappedError
+                        });
                     }
-
-                    if (batchToaster.length === 0) continue;
-
-                    try {
-                        const result = await sendBatchMessages(churchId, batchToaster);
-
-                        for (let i = 0; i < batchToaster.length; i++) {
-                            const sendResult = result.results[i];
-                            const docRef = memberDocsList[i].ref;
-
-                            if (sendResult.status === 'sent') {
-                                await docRef.update({
-                                    notificado: true,
-                                    notificadoEm: admin.firestore.FieldValue.serverTimestamp()
-                                });
-                            } else {
-                                await docRef.update({
-                                    notificado: false,
-                                    notificadoErro: sendResult.failReason || 'numero_invalido'
-                                });
-                            }
-                        }
-                    } catch (error) {
-                        console.error(`Error sending batch for church ${churchId} escala ${escalaDoc.id}`, error);
-                    }
+                } catch (error) {
+                    console.error(`Error sending batch for church ${churchId} escala ${escalaDoc.id}`, error);
                 }
             }
         }
