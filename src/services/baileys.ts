@@ -1,4 +1,4 @@
-import makeWASocket, { DisconnectReason, WASocket } from '@whiskeysockets/baileys';
+import { makeWASocket, Browsers, DisconnectReason, WASocket } from '@whiskeysockets/baileys';
 import { useCustomFileAuthState, clearSession } from './session';
 import path from 'path';
 import pino from 'pino';
@@ -116,6 +116,7 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
+            browser: Browsers.macOS('Google Chrome'),
             logger,
             syncFullHistory: false,
             markOnlineOnConnect: false
