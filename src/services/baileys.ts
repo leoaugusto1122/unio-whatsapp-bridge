@@ -23,6 +23,8 @@ interface ConnectingInstanceData {
     sessionsDir: string;
     startedAt: string;
     attemptId: string;
+    pairingCode?: string;
+    pairingCodeExpiresAt?: string;
 }
 
 type ConnectOptions = {
@@ -131,13 +133,47 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
             attemptId
         });
 
+        const needsPairing = !sock.authState.creds.registered;
+        let pairingCodeRequested = false;
+        let pairingCodeResolve: ((code: string) => void) | null = null;
+        let pairingCodeReject: ((error: unknown) => void) | null = null;
+        const pairingCodePromise = needsPairing
+            ? new Promise<string>((resolve, reject) => {
+                pairingCodeResolve = resolve;
+                pairingCodeReject = reject;
+            })
+            : null;
+
         sock.ev.on('creds.update', saveCreds);
 
         sock.ev.on('connection.update', (update) => {
             const { connection, lastDisconnect } = update;
+            const qr = (update as any)?.qr as string | undefined;
 
             if (!isCurrentSock(churchId, sock)) {
                 return;
+            }
+
+            if (needsPairing && phoneNumber && (connection === 'connecting' || !!qr) && !pairingCodeRequested) {
+                pairingCodeRequested = true;
+                void (async () => {
+                    try {
+                        console.log('Requesting pairing code for number:', phoneNumber);
+                        const code = await sock.requestPairingCode(phoneNumber);
+                        console.log('Pairing code generated:', code);
+
+                        const current = connectingInstances.get(churchId);
+                        if (current?.attemptId === attemptId) {
+                            current.pairingCode = code;
+                            current.pairingCodeExpiresAt = new Date(Date.now() + 60_000).toISOString();
+                            connectingInstances.set(churchId, current);
+                        }
+
+                        pairingCodeResolve?.(code);
+                    } catch (error) {
+                        pairingCodeReject?.(error);
+                    }
+                })();
             }
 
             if (connection === 'open') {
@@ -177,11 +213,12 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
                 destroySock(sock, 'phone_required_for_pairing');
                 throw new Error('phone_required_for_pairing');
             }
-            // Small delay as recommended when requesting pairing code
-            await new Promise(resolve => setTimeout(resolve, 1500));
+
             try {
-                console.log('Requesting pairing code for number:', phoneNumber);
-                const code = await sock.requestPairingCode(phoneNumber);
+                const code = await Promise.race([
+                    pairingCodePromise!,
+                    new Promise<string>((_, reject) => setTimeout(() => reject(new Error('pairing_code_timeout')), 20_000))
+                ]);
                 return { status: 'pending', pairingCode: code, expiresIn: 60 };
             } catch (error) {
                 if (connectingInstances.get(churchId)?.sock === sock) {
@@ -208,7 +245,18 @@ export async function getInstanceStatus(churchId: string) {
     }
     if (connectingInstances.has(churchId)) {
         const data = connectingInstances.get(churchId);
-        return { churchId, status: 'connecting', phoneNumber: data?.phoneNumber, startedAt: data?.startedAt };
+        const pairingCode = data?.pairingCodeExpiresAt && Date.parse(data.pairingCodeExpiresAt) > Date.now()
+            ? data?.pairingCode
+            : undefined;
+
+        return {
+            churchId,
+            status: 'connecting',
+            phoneNumber: data?.phoneNumber,
+            startedAt: data?.startedAt,
+            pairingCode,
+            pairingCodeExpiresAt: data?.pairingCodeExpiresAt
+        };
     }
     return { churchId, status: 'disconnected' };
 }
