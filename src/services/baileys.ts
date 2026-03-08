@@ -11,6 +11,17 @@ function getSessionsDir() {
     return process.env.SESSIONS_DIR || DEFAULT_SESSIONS_DIR;
 }
 
+const PAIRING_CODE_TIMEOUT = 60_000; // 60 segundos
+
+const UNHANDLED_REJECTION_HANDLER_KEY = '__unio_whatsapp_bridge_unhandled_rejection_handler__';
+if (!(globalThis as any)[UNHANDLED_REJECTION_HANDLER_KEY]) {
+    (globalThis as any)[UNHANDLED_REJECTION_HANDLER_KEY] = true;
+    // Nunca deixar erros do Baileys propagarem para process level
+    process.on('unhandledRejection', (err) => {
+        console.error('Unhandled rejection (suppressed):', err);
+    });
+}
+
 interface InstanceData {
     sock: WASocket;
     phoneNumber?: string;
@@ -23,6 +34,7 @@ interface ConnectingInstanceData {
     sessionsDir: string;
     startedAt: string;
     attemptId: string;
+    pairingCodeRequested?: boolean;
     pairingCode?: string;
     pairingCodeExpiresAt?: string;
 }
@@ -130,11 +142,11 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
             phoneNumber,
             sessionsDir,
             startedAt: new Date().toISOString(),
-            attemptId
+            attemptId,
+            pairingCodeRequested: false
         });
 
         const needsPairing = !sock.authState.creds.registered;
-        let pairingCodeRequested = false;
         let pairingCodeResolve: ((code: string) => void) | null = null;
         let pairingCodeReject: ((error: unknown) => void) | null = null;
         const pairingCodePromise = needsPairing
@@ -148,29 +160,31 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
 
         const maybeRequestPairingCode = async (update: any) => {
             if (!needsPairing || !phoneNumber) return;
-            if (pairingCodeRequested) return;
+
+            const current = connectingInstances.get(churchId);
+            if (!current || current.attemptId !== attemptId) return;
+            if (current.pairingCodeRequested) return;
 
             const { connection } = update as { connection?: string };
             const qr = update?.qr as string | undefined;
             if (connection !== 'connecting' && !qr) return;
 
-            pairingCodeRequested = true;
+            current.pairingCodeRequested = true;
+            connectingInstances.set(churchId, current);
             try {
                 console.log('Requesting pairing code for number:', phoneNumber);
                 const code = await sock.requestPairingCode(phoneNumber);
                 console.log('Pairing code generated:', code);
 
-                const current = connectingInstances.get(churchId);
-                if (current?.attemptId === attemptId) {
-                    current.pairingCode = code;
-                    current.pairingCodeExpiresAt = new Date(Date.now() + 60_000).toISOString();
-                    connectingInstances.set(churchId, current);
-                }
+                current.pairingCode = code;
+                current.pairingCodeExpiresAt = new Date(Date.now() + 60_000).toISOString();
+                connectingInstances.set(churchId, current);
 
                 pairingCodeResolve?.(code);
             } catch (err) {
                 console.error('Pairing code error:', err);
-                pairingCodeRequested = false;
+                current.pairingCodeRequested = false;
+                connectingInstances.set(churchId, current);
                 // never allow errors to escape the event handler; keep waiting for another attempt
             }
         };
@@ -229,15 +243,13 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
             try {
                 const code = await Promise.race([
                     pairingCodePromise!,
-                    new Promise<string>((_, reject) => setTimeout(() => reject(new Error('pairing_code_timeout')), 20_000))
+                    new Promise<string>((_, reject) => setTimeout(() => reject(new Error('pairing_code_timeout')), PAIRING_CODE_TIMEOUT))
                 ]);
                 return { status: 'pending', pairingCode: code, expiresIn: 60 };
             } catch (error) {
-                if (connectingInstances.get(churchId)?.sock === sock) {
-                    connectingInstances.delete(churchId);
-                }
-                destroySock(sock, 'pairing_code_request_failed');
-                throw error;
+                console.error('Pairing code wait error (non-fatal):', error);
+                // Keep the socket alive; the code may be generated later and can be polled via /instance/status
+                return { status: 'connecting', phoneNumber };
             }
         }
 
