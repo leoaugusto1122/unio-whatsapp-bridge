@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { connectInstance, getInstanceStatus, disconnectInstance } from '../services/baileys.js';
+import { connectInstance, getInstanceQrCode, getInstanceStatus, disconnectInstance } from '../services/baileys.js';
 import { normalizePhoneDigits, PhoneValidationError } from '../utils/phone.js';
 
 const router = Router();
@@ -7,11 +7,11 @@ const router = Router();
 router.post('/connect', async (req, res) => {
     try {
         const { churchId, phoneNumber } = req.body;
-        if (!churchId || !phoneNumber) {
-            return res.status(400).json({ error: 'churchId and phoneNumber are required' });
+        if (!churchId) {
+            return res.status(400).json({ error: 'churchId is required' });
         }
 
-        const finalPhone = normalizePhoneDigits(phoneNumber);
+        const finalPhone = phoneNumber ? normalizePhoneDigits(phoneNumber) : undefined;
         const result = await connectInstance(churchId, finalPhone);
         res.json(result);
     } catch (error: any) {
@@ -26,6 +26,16 @@ router.get('/status/:churchId', async (req, res) => {
     try {
         const { churchId } = req.params;
         const result = await getInstanceStatus(churchId);
+        res.json(result);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+router.get('/qrcode/:churchId', async (req, res) => {
+    try {
+        const { churchId } = req.params;
+        const result = await getInstanceQrCode(churchId);
         res.json(result);
     } catch (error: any) {
         res.status(500).json({ error: error.message });

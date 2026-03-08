@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pino from 'pino';
 import type { Boom } from '@hapi/boom';
+import QRCode from 'qrcode';
 import fs from 'fs/promises';
 import { normalizePhoneToJid, PhoneValidationError } from '../utils/phone.js';
 
@@ -44,6 +45,9 @@ interface ConnectingInstanceData {
     pairingCodeRequestInFlight: boolean;
     pairingCodeLastRequestedAt?: number;
     pairingCodeRefreshTimer?: ReturnType<typeof setTimeout>;
+    qr?: string;
+    qrPngBase64?: string;
+    qrUpdatedAt?: string;
 }
 
 type ConnectOptions = {
@@ -122,6 +126,25 @@ function makeAttemptId() {
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+async function toQrPngBase64(qr: string) {
+    if (!qr) return null;
+    if (qr.startsWith('data:image/')) {
+        const idx = qr.indexOf(',');
+        if (idx >= 0) return qr.slice(idx + 1);
+        return null;
+    }
+
+    const dataUrl = await QRCode.toDataURL(qr, {
+        type: 'image/png',
+        margin: 1,
+        scale: 6,
+        errorCorrectionLevel: 'M'
+    });
+    const idx = dataUrl.indexOf(',');
+    if (idx < 0) return null;
+    return dataUrl.slice(idx + 1);
+}
+
 function getPairingExpiresInSeconds(expiresAt?: string) {
     if (!expiresAt) return null;
     const ms = Date.parse(expiresAt) - Date.now();
@@ -140,6 +163,10 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
         const ifConnecting = options.ifConnecting ?? 'return';
         if (connectingInstances.has(churchId)) {
             const current = connectingInstances.get(churchId);
+            if (current && phoneNumber && !current.phoneNumber) {
+                current.phoneNumber = phoneNumber;
+                connectingInstances.set(churchId, current);
+            }
             const expiresIn = getPairingExpiresInSeconds(current?.pairingCodeExpiresAt);
             if (current?.pairingCode && expiresIn && expiresIn > 0) {
                 return { status: 'pending', pairingCode: current.pairingCode, expiresIn };
@@ -157,7 +184,7 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
-            browser: Browsers.macOS('Google Chrome'),
+            browser: ["Ubuntu", "Chrome", "20.0.04"],
             logger,
             syncFullHistory: false,
             markOnlineOnConnect: false
@@ -175,7 +202,10 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
             pairingCodeExpiresAt: preservedPairing?.pairingCodeExpiresAt,
             pairingCodeRequestInFlight: false,
             pairingCodeLastRequestedAt: preservedPairing?.pairingCode ? Date.now() : undefined,
-            pairingCodeRefreshTimer: undefined
+            pairingCodeRefreshTimer: undefined,
+            qr: undefined,
+            qrPngBase64: undefined,
+            qrUpdatedAt: undefined
         });
 
         const needsPairing = !sock.authState.creds.registered;
@@ -254,6 +284,33 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
                 return;
             }
 
+            if (typeof update?.qr === 'string' && update.qr) {
+                const qr = update.qr;
+                const current = connectingInstances.get(churchId);
+                if (current?.attemptId === attemptId && current.qr !== qr) {
+                    current.qr = qr;
+                    current.qrUpdatedAt = new Date().toISOString();
+                    current.qrPngBase64 = undefined;
+                    connectingInstances.set(churchId, current);
+
+                    void (async () => {
+                        try {
+                            const pngBase64 = await toQrPngBase64(qr);
+                            if (!pngBase64) return;
+
+                            const latest = connectingInstances.get(churchId);
+                            if (!latest || latest.attemptId !== attemptId) return;
+                            if (latest.qr !== qr) return;
+
+                            latest.qrPngBase64 = pngBase64;
+                            connectingInstances.set(churchId, latest);
+                        } catch (error) {
+                            console.warn('Failed to generate QR PNG base64:', error);
+                        }
+                    })();
+                }
+            }
+
             void maybeRequestPairingCode(update);
 
             if (connection === 'open') {
@@ -313,11 +370,8 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
 
         if (!sock.authState.creds.registered) {
             if (!phoneNumber) {
-                if (connectingInstances.get(churchId)?.sock === sock) {
-                    connectingInstances.delete(churchId);
-                }
-                destroySock(sock, 'phone_required_for_pairing');
-                throw new Error('phone_required_for_pairing');
+                // QR mode: keep socket alive and let the client fetch the QR via /instance/qrcode/:churchId
+                return { status: 'connecting', phoneNumber };
             }
 
             try {
@@ -337,6 +391,40 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
 
         return { status: 'connecting', phoneNumber };
     });
+}
+
+export async function getInstanceQrCode(churchId: string) {
+    if (instances.has(churchId)) {
+        return { churchId, status: 'connected' as const };
+    }
+
+    const data = connectingInstances.get(churchId);
+    if (!data) {
+        return { churchId, status: 'disconnected' as const };
+    }
+
+    if (!data.qr) {
+        return { churchId, status: 'connecting' as const, qrPngBase64: undefined as string | undefined, qrUpdatedAt: data.qrUpdatedAt };
+    }
+
+    if (!data.qrPngBase64) {
+        try {
+            const pngBase64 = await toQrPngBase64(data.qr);
+            if (pngBase64) {
+                data.qrPngBase64 = pngBase64;
+                connectingInstances.set(churchId, data);
+            }
+        } catch (error) {
+            console.warn('Failed to generate QR PNG base64 (on-demand):', error);
+        }
+    }
+
+    return {
+        churchId,
+        status: 'connecting' as const,
+        qrPngBase64: data.qrPngBase64,
+        qrUpdatedAt: data.qrUpdatedAt
+    };
 }
 
 export async function getInstanceStatus(churchId: string) {
