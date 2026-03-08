@@ -179,13 +179,30 @@ export async function connectInstance(churchId: string, options: ConnectOptions 
                 return;
             }
 
+            try {
+                console.log(
+                    'connection.update:',
+                    JSON.stringify({
+                        churchId,
+                        connection: update?.connection,
+                        hasQR: !!update?.qr,
+                        qrLength: typeof update?.qr === 'string' ? update.qr.length : undefined,
+                    })
+                );
+            } catch (err) {
+                console.log('connection.update: (log_failed)', { churchId, err });
+            }
+
             if (qr) {
+                console.log('QR Code received, saving to instance...');
                 const current = connectingInstances.get(churchId);
                 if (current?.attemptId === attemptId) {
                     current.qrCode = qr;
                     current.qrCodeUpdatedAt = Date.now();
                     connectingInstances.set(churchId, current);
-                    console.log(`QR Code updated for church ${churchId}`);
+                    console.log('QR Code saved for church:', churchId);
+                } else if (!current) {
+                    console.log('WARNING: instance not found in connectingInstances for:', churchId);
                 }
             }
 
