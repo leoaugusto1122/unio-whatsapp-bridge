@@ -180,6 +180,7 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
             // Small delay as recommended when requesting pairing code
             await new Promise(resolve => setTimeout(resolve, 1500));
             try {
+                console.log('Requesting pairing code for number:', phoneNumber);
                 const code = await sock.requestPairingCode(phoneNumber);
                 return { status: 'pending', pairingCode: code, expiresIn: 60 };
             } catch (error) {
