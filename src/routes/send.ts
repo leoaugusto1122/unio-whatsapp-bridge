@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { sendIndividualMessage, sendBatchMessages } from '../services/baileys';
+import { sendIndividualMessage, sendBatchMessages } from '../services/baileys.js';
 
 const router = Router();
 

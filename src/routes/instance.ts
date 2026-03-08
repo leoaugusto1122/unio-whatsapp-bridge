@@ -1,6 +1,6 @@
 import { Router } from 'express';
-import { connectInstance, getInstanceStatus, disconnectInstance } from '../services/baileys';
-import { normalizePhoneDigits, PhoneValidationError } from '../utils/phone';
+import { connectInstance, getInstanceStatus, disconnectInstance } from '../services/baileys.js';
+import { normalizePhoneDigits, PhoneValidationError } from '../utils/phone.js';
 
 const router = Router();
 

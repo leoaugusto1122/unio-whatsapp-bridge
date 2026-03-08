@@ -1,7 +1,7 @@
 import cron from 'node-cron';
-import { db } from './firestore';
-import { getInstanceStatus, sendBatchMessages } from './baileys';
-import * as admin from 'firebase-admin';
+import { db } from './firestore.js';
+import { getInstanceStatus, sendBatchMessages } from './baileys.js';
+import admin from 'firebase-admin';
 
 const DEFAULT_INTERVAL_MINUTES = 60;
 const DEFAULT_ADVANCE_HOURS = 24;

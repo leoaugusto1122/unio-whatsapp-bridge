@@ -1,11 +1,14 @@
-import { makeWASocket, Browsers, DisconnectReason, WASocket } from '@whiskeysockets/baileys';
-import { useCustomFileAuthState, clearSession } from './session';
+import { makeWASocket, Browsers, DisconnectReason, WASocket } from 'baileys';
+import { useCustomFileAuthState, clearSession } from './session.js';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import pino from 'pino';
-import { Boom } from '@hapi/boom';
+import type { Boom } from '@hapi/boom';
 import fs from 'fs/promises';
-import { normalizePhoneToJid, PhoneValidationError } from '../utils/phone';
+import { normalizePhoneToJid, PhoneValidationError } from '../utils/phone.js';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const DEFAULT_SESSIONS_DIR = path.join(__dirname, '../../sessions');
 function getSessionsDir() {
     return process.env.SESSIONS_DIR || DEFAULT_SESSIONS_DIR;

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getConnectedInstancesCount } from '../services/baileys';
+import { getConnectedInstancesCount } from '../services/baileys.js';
 
 const router = Router();
 

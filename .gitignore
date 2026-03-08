@@ -1,5 +1,6 @@
 node_modules/
 dist/
 sessions/
+.npm-cache/
 .env
 .DS_Store

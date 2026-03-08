@@ -1,12 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import authMiddleware from './middleware/auth';
-import instanceRoutes from './routes/instance';
-import sendRoutes from './routes/send';
-import healthRoutes from './routes/health';
-import { startScheduler } from './services/scheduler';
-import { bootstrapInstancesFromSessions } from './services/baileys';
+import authMiddleware from './middleware/auth.js';
+import instanceRoutes from './routes/instance.js';
+import sendRoutes from './routes/send.js';
+import healthRoutes from './routes/health.js';
+import { startScheduler } from './services/scheduler.js';
+import { bootstrapInstancesFromSessions } from './services/baileys.js';
 
 if (process.env.NODE_ENV !== 'production') {
     dotenv.config();
