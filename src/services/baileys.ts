@@ -14,7 +14,9 @@ function getSessionsDir() {
     return process.env.SESSIONS_DIR || DEFAULT_SESSIONS_DIR;
 }
 
-const QR_CODE_MAX_AGE_MS = 25_000;
+const PAIRING_CODE_TTL_MS = 60_000; // ~60 segundos (janela de validade do código)
+const PAIRING_CODE_RETRY_COOLDOWN_MS = 5_000; // evita rajadas de requestPairingCode em sequência
+const PAIRING_CODE_TIMEOUT = PAIRING_CODE_TTL_MS; // tempo máximo para gerar o primeiro código nesta chamada
 
 const UNHANDLED_REJECTION_HANDLER_KEY = '__unio_whatsapp_bridge_unhandled_rejection_handler__';
 if (!(globalThis as any)[UNHANDLED_REJECTION_HANDLER_KEY]) {
@@ -33,11 +35,15 @@ interface InstanceData {
 
 interface ConnectingInstanceData {
     sock: WASocket;
+    phoneNumber?: string;
     sessionsDir: string;
     startedAt: string;
     attemptId: string;
-    qrCode?: string;
-    qrCodeUpdatedAt?: number;
+    pairingCode?: string;
+    pairingCodeExpiresAt?: string;
+    pairingCodeRequestInFlight: boolean;
+    pairingCodeLastRequestedAt?: number;
+    pairingCodeRefreshTimer?: ReturnType<typeof setTimeout>;
 }
 
 type ConnectOptions = {
@@ -47,6 +53,10 @@ type ConnectOptions = {
      * - "reset": destroy socket, wipe session dir, start a fresh connection
      */
     ifConnecting?: 'return' | 'reset';
+    /**
+     * Internal option used by reconnect logic to avoid churning pairing codes.
+     */
+    preservePairing?: Pick<ConnectingInstanceData, 'pairingCode' | 'pairingCodeExpiresAt'>;
 };
 
 const instances = new Map<string, InstanceData>();
@@ -100,6 +110,9 @@ async function resetConnectingInstance(churchId: string) {
     if (!connecting) return false;
 
     connectingInstances.delete(churchId);
+    if (connecting.pairingCodeRefreshTimer) {
+        clearTimeout(connecting.pairingCodeRefreshTimer);
+    }
     destroySock(connecting.sock, 'connecting_instance_reset');
     await clearSession(churchId, connecting.sessionsDir);
     return true;
@@ -109,31 +122,15 @@ function makeAttemptId() {
     return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function extractPhoneNumberFromUserId(userId?: string) {
-    if (!userId) return undefined;
-    const beforeAt = userId.split('@')[0] || userId;
-    const beforeColon = beforeAt.split(':')[0] || beforeAt;
-    const digits = beforeColon.replace(/\D/g, '');
-    return digits || undefined;
+function getPairingExpiresInSeconds(expiresAt?: string) {
+    if (!expiresAt) return null;
+    const ms = Date.parse(expiresAt) - Date.now();
+    if (!Number.isFinite(ms)) return null;
+    if (ms <= 0) return 0;
+    return Math.max(1, Math.ceil(ms / 1000));
 }
 
-export function getFreshQrCode(churchId: string, maxAgeMs = QR_CODE_MAX_AGE_MS) {
-    const latest = getLatestQrCode(churchId);
-    if (!latest) return null;
-    if (latest.ageMs > maxAgeMs) return null;
-    return latest;
-}
-
-export function getLatestQrCode(churchId: string) {
-    const instance = connectingInstances.get(churchId);
-    if (!instance?.qrCode) return null;
-    const updatedAt = instance.qrCodeUpdatedAt ?? 0;
-    const ageMs = Date.now() - updatedAt;
-    if (!Number.isFinite(ageMs)) return null;
-    return { qrCode: instance.qrCode, ageMs };
-}
-
-export async function connectInstance(churchId: string, options: ConnectOptions = {}) {
+export async function connectInstance(churchId: string, phoneNumber?: string, options: ConnectOptions = {}) {
     return runExclusive(churchId, async () => {
         if (instances.has(churchId)) {
             const data = instances.get(churchId);
@@ -142,11 +139,19 @@ export async function connectInstance(churchId: string, options: ConnectOptions 
 
         const ifConnecting = options.ifConnecting ?? 'return';
         if (connectingInstances.has(churchId)) {
+            const current = connectingInstances.get(churchId);
+            if (current && phoneNumber && !current.phoneNumber) {
+                current.phoneNumber = phoneNumber;
+                connectingInstances.set(churchId, current);
+            }
+            const expiresIn = getPairingExpiresInSeconds(current?.pairingCodeExpiresAt);
+            if (current?.pairingCode && expiresIn && expiresIn > 0) {
+                return { status: 'pending', pairingCode: current.pairingCode, expiresIn };
+            }
             if (ifConnecting === 'reset') {
                 await resetConnectingInstance(churchId);
             } else {
-                const qrAvailable = !!getFreshQrCode(churchId);
-                return { status: qrAvailable ? 'pending' : 'connecting', qrAvailable };
+                return { status: 'connecting', phoneNumber: connectingInstances.get(churchId)?.phoneNumber };
             }
         }
 
@@ -163,56 +168,107 @@ export async function connectInstance(churchId: string, options: ConnectOptions 
         });
 
         const attemptId = makeAttemptId();
+        const preservedPairing = options.preservePairing;
         connectingInstances.set(churchId, {
             sock,
+            phoneNumber,
             sessionsDir,
             startedAt: new Date().toISOString(),
-            attemptId
+            attemptId,
+            pairingCode: preservedPairing?.pairingCode,
+            pairingCodeExpiresAt: preservedPairing?.pairingCodeExpiresAt,
+            pairingCodeRequestInFlight: false,
+            pairingCodeLastRequestedAt: preservedPairing?.pairingCode ? Date.now() : undefined,
+            pairingCodeRefreshTimer: undefined
         });
+
+        const needsPairing = !sock.authState.creds.registered;
+        let pairingCodeResolve: ((code: string) => void) | null = null;
+        const pairingCodePromise = needsPairing
+            ? new Promise<string>((resolve, reject) => {
+                pairingCodeResolve = resolve;
+            })
+            : null;
 
         sock.ev.on('creds.update', saveCreds);
 
+        const maybeRequestPairingCode = async (update: any) => {
+            if (!needsPairing || !phoneNumber) return;
+
+            const current = connectingInstances.get(churchId);
+            if (!current || current.attemptId !== attemptId) return;
+
+            const expiresIn = getPairingExpiresInSeconds(current.pairingCodeExpiresAt);
+            if (current.pairingCode && expiresIn && expiresIn > 0) {
+                pairingCodeResolve?.(current.pairingCode);
+                return;
+            }
+
+            if (current.pairingCodeRequestInFlight) return;
+
+            const now = Date.now();
+            if (current.pairingCodeLastRequestedAt && (now - current.pairingCodeLastRequestedAt) < PAIRING_CODE_RETRY_COOLDOWN_MS) {
+                return;
+            }
+
+            // requestPairingCode requires an open WS connection; avoid calling too early (causes "Connection Closed")
+            if (!sock.ws?.isOpen) return;
+
+            const { connection } = update as { connection?: string };
+            const qr = update?.qr as string | undefined;
+            if (connection !== 'connecting' && !qr) return;
+
+            current.pairingCodeRequestInFlight = true;
+            current.pairingCodeLastRequestedAt = now;
+            connectingInstances.set(churchId, current);
+            try {
+                console.log('Requesting pairing code for number:', phoneNumber);
+                const code = await sock.requestPairingCode(phoneNumber);
+                console.log('Pairing code generated:', code);
+
+                current.pairingCode = code;
+                current.pairingCodeExpiresAt = new Date(Date.now() + PAIRING_CODE_TTL_MS).toISOString();
+                current.pairingCodeRequestInFlight = false;
+
+                if (current.pairingCodeRefreshTimer) {
+                    clearTimeout(current.pairingCodeRefreshTimer);
+                }
+                const refreshInMs = Math.max(1_000, Date.parse(current.pairingCodeExpiresAt) - Date.now() + 250);
+                current.pairingCodeRefreshTimer = setTimeout(() => {
+                    const latest = connectingInstances.get(churchId);
+                    if (!latest || latest.attemptId !== attemptId) return;
+                    void maybeRequestPairingCode({ connection: 'connecting' });
+                }, refreshInMs);
+
+                connectingInstances.set(churchId, current);
+
+                pairingCodeResolve?.(code);
+            } catch (err) {
+                console.error('Pairing code error:', err);
+                current.pairingCodeRequestInFlight = false;
+                connectingInstances.set(churchId, current);
+                // never allow errors to escape the event handler; keep waiting for another attempt
+            }
+        };
+
         sock.ev.on('connection.update', (update) => {
-            const { connection, lastDisconnect, qr } = update as { connection?: string; lastDisconnect?: any; qr?: string };
+            const { connection, lastDisconnect } = update;
 
             if (!isCurrentSock(churchId, sock)) {
                 return;
             }
 
-            try {
-                console.log(
-                    'connection.update:',
-                    JSON.stringify({
-                        churchId,
-                        connection: update?.connection,
-                        hasQR: !!update?.qr,
-                        qrLength: typeof update?.qr === 'string' ? update.qr.length : undefined,
-                    })
-                );
-            } catch (err) {
-                console.log('connection.update: (log_failed)', { churchId, err });
-            }
-
-            if (qr) {
-                console.log('QR Code received, saving to instance...');
-                const current = connectingInstances.get(churchId);
-                if (current?.attemptId === attemptId) {
-                    current.qrCode = qr;
-                    current.qrCodeUpdatedAt = Date.now();
-                    connectingInstances.set(churchId, current);
-                    console.log('QR Code saved for church:', churchId);
-                } else if (!current) {
-                    console.log('WARNING: instance not found in connectingInstances for:', churchId);
-                }
-            }
+            void maybeRequestPairingCode(update);
 
             if (connection === 'open') {
                 const current = connectingInstances.get(churchId);
                 if (current?.attemptId === attemptId) {
-                    const derivedPhone = extractPhoneNumberFromUserId(sock.user?.id);
+                    if (current.pairingCodeRefreshTimer) {
+                        clearTimeout(current.pairingCodeRefreshTimer);
+                    }
                     instances.set(churchId, {
                         sock,
-                        phoneNumber: derivedPhone,
+                        phoneNumber: current.phoneNumber,
                         connectedSince: new Date().toISOString()
                     });
                     connectingInstances.delete(churchId);
@@ -220,36 +276,73 @@ export async function connectInstance(churchId: string, options: ConnectOptions 
             } else if (connection === 'close') {
                 const error = (lastDisconnect?.error as Boom)?.output?.statusCode;
                 const shouldReconnect = error !== DisconnectReason.loggedOut;
-                const shouldClearSession =
-                    error === DisconnectReason.loggedOut ||
-                    error === DisconnectReason.badSession ||
-                    error === DisconnectReason.multideviceMismatch;
+
+                const preservedPairing = (() => {
+                    const current = connectingInstances.get(churchId);
+                    if (!current || current.attemptId !== attemptId) return undefined;
+                    const expiresIn = getPairingExpiresInSeconds(current.pairingCodeExpiresAt);
+                    if (!current.pairingCode || !expiresIn || expiresIn <= 0) return undefined;
+                    return { pairingCode: current.pairingCode, pairingCodeExpiresAt: current.pairingCodeExpiresAt };
+                })();
 
                 if (instances.get(churchId)?.sock === sock) {
                     instances.delete(churchId);
                 }
                 if (connectingInstances.get(churchId)?.sock === sock) {
+                    const current = connectingInstances.get(churchId);
                     connectingInstances.delete(churchId);
-                }
-
-                if (shouldClearSession) {
-                    void clearSession(churchId, sessionsDir);
+                    if (current?.pairingCodeRefreshTimer) {
+                        clearTimeout(current.pairingCodeRefreshTimer);
+                    }
                 }
 
                 if (shouldReconnect) {
                     setTimeout(() => {
-                        void connectInstance(churchId).catch(err => {
+                        void connectInstance(churchId, phoneNumber, { preservePairing: preservedPairing }).catch(err => {
                             console.error(`Reconnect failed for church ${churchId}:`, err);
                         });
                     }, 5000);
+                } else {
+                    clearSession(churchId, sessionsDir);
                 }
             }
         });
 
-        const qrAvailable = !!getFreshQrCode(churchId);
-        return { status: qrAvailable ? 'pending' : 'connecting', qrAvailable };
+        // Some environments emit "connecting" updates before WS is actually open.
+        // Trigger another attempt when the underlying WS opens.
+        sock.ws.on('open', () => {
+            if (!isCurrentSock(churchId, sock)) return;
+            void maybeRequestPairingCode({ connection: 'connecting' });
+        });
+
+        if (!sock.authState.creds.registered) {
+            if (!phoneNumber) {
+                if (connectingInstances.get(churchId)?.sock === sock) {
+                    connectingInstances.delete(churchId);
+                }
+                destroySock(sock, 'phone_required_for_pairing');
+                throw new Error('phone_required_for_pairing');
+            }
+
+            try {
+                const code = await Promise.race([
+                    pairingCodePromise!,
+                    new Promise<string>((_, reject) => setTimeout(() => reject(new Error('pairing_code_timeout')), PAIRING_CODE_TIMEOUT))
+                ]);
+                const current = connectingInstances.get(churchId);
+                const expiresIn = getPairingExpiresInSeconds(current?.pairingCodeExpiresAt) ?? 60;
+                return { status: 'pending', pairingCode: code, expiresIn };
+            } catch (error) {
+                console.error('Pairing code wait error (non-fatal):', error);
+                // Keep the socket alive; the code may be generated later and can be polled via /instance/status
+                return { status: 'connecting', phoneNumber };
+            }
+        }
+
+        return { status: 'connecting', phoneNumber };
     });
 }
+
 export async function getInstanceStatus(churchId: string) {
     if (instances.has(churchId)) {
         const data = instances.get(churchId);
@@ -262,12 +355,17 @@ export async function getInstanceStatus(churchId: string) {
     }
     if (connectingInstances.has(churchId)) {
         const data = connectingInstances.get(churchId);
-        const qrAvailable = !!getFreshQrCode(churchId);
+        const pairingCode = data?.pairingCodeExpiresAt && Date.parse(data.pairingCodeExpiresAt) > Date.now()
+            ? data?.pairingCode
+            : undefined;
+
         return {
             churchId,
             status: 'connecting',
+            phoneNumber: data?.phoneNumber,
             startedAt: data?.startedAt,
-            qrAvailable
+            pairingCode,
+            pairingCodeExpiresAt: data?.pairingCodeExpiresAt
         };
     }
     return { churchId, status: 'disconnected' };
