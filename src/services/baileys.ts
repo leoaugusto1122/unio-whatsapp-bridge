@@ -165,6 +165,9 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
             if (!current || current.attemptId !== attemptId) return;
             if (current.pairingCodeRequested) return;
 
+            // requestPairingCode requires an open WS connection; avoid calling too early (causes "Connection Closed")
+            if (!sock.ws?.isOpen) return;
+
             const { connection } = update as { connection?: string };
             const qr = update?.qr as string | undefined;
             if (connection !== 'connecting' && !qr) return;
@@ -229,6 +232,13 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
                     clearSession(churchId, sessionsDir);
                 }
             }
+        });
+
+        // Some environments emit "connecting" updates before WS is actually open.
+        // Trigger another attempt when the underlying WS opens.
+        sock.ws.on('open', () => {
+            if (!isCurrentSock(churchId, sock)) return;
+            void maybeRequestPairingCode({ connection: 'connecting' });
         });
 
         if (!sock.authState.creds.registered) {
