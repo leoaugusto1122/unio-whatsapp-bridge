@@ -1,7 +1,8 @@
 import cron from 'node-cron';
-import { db } from './firestore.js';
-import { getInstanceStatus, sendBatchText } from './evolution.js';
+import { db, listEnabledChurches } from './firestore.js';
+import { sendBatchText } from './evolution.js';
 import admin from 'firebase-admin';
+import { syncChurchConnectionStatus } from './connection-sync.js';
 
 const DEFAULT_INTERVAL_MINUTES = 60;
 const DEFAULT_ADVANCE_HOURS = 24;
@@ -136,39 +137,22 @@ async function runBatchJob() {
     if (!db) return;
 
     try {
-        let churchDocs: any[] = [];
         const timeZone = getTimeZone();
+        const churches = await listEnabledChurches();
 
-        try {
-            const snapshot = await db.collection('igrejas')
-                .where('whatsappAutomation.enabled', '==', true)
-                .where('whatsappAutomation.connected', '==', true)
-                .get();
-            churchDocs = snapshot.docs;
-        } catch (error) {
-            console.warn('Eligible churches query failed; falling back to full scan:', error);
-            const snapshot = await db.collection('igrejas').get();
-            churchDocs = snapshot.docs.filter((doc: any) => {
-                const data = doc.data();
-                const config = data?.whatsappAutomation || {};
-                return config.enabled === true && config.connected === true;
-            });
-        }
-
-        for (const doc of churchDocs) {
-            const churchId = doc.id;
-            const churchData = doc.data();
+        for (const church of churches) {
+            const churchId = church.id;
+            const churchData = church.data;
             const config = churchData?.whatsappAutomation || {};
 
-            let status;
-            try {
-                status = await getInstanceStatus(churchId);
-            } catch (error) {
-                console.error(`Failed to read Evolution connection state for church ${churchId}:`, error);
+            const syncResult = await syncChurchConnectionStatus(churchId, 'scheduler_job');
+
+            if (syncResult.error) {
+                console.error(`Failed to synchronize connection state for church ${churchId}: ${syncResult.error}`);
                 continue;
             }
 
-            if (status.status !== 'connected') {
+            if (syncResult.statusNovo !== true) {
                 console.log(`Church ${churchId} disconnected. Job skipped.`);
                 continue;
             }

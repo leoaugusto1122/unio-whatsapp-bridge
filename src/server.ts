@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { startScheduler } from './services/scheduler.js';
 import { validateEvolutionConfig } from './services/evolution.js';
+import { startPeriodicConnectionStatusSyncJob } from './services/connection-sync.js';
 
 if (process.env.NODE_ENV !== 'production') {
     dotenv.config();
@@ -26,6 +27,7 @@ function bootstrap() {
 
     console.log('Starting WhatsApp scheduler worker');
     startScheduler();
+    startPeriodicConnectionStatusSyncJob();
 }
 
 bootstrap();
