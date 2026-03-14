@@ -161,7 +161,7 @@ export async function connectInstance(churchId: string, phoneNumber?: string, op
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
-            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            browser: Browsers.macOS("Chrome"),
             logger,
             syncFullHistory: false,
             markOnlineOnConnect: false
