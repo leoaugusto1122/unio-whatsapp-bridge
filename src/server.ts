@@ -33,6 +33,15 @@ function getBridgeApiKey() {
     return process.env.EVOLUTION_API_KEY?.trim() || '';
 }
 
+function getBuildMetadata() {
+    return {
+        service: 'bridge',
+        version: process.env.APP_VERSION?.trim() || null,
+        commit: process.env.BUILD_COMMIT?.trim() || null,
+        syncRouteEnabled: true
+    };
+}
+
 function logHttp(payload: Record<string, unknown>) {
     console.log(JSON.stringify({
         timestamp: new Date().toISOString(),
@@ -51,10 +60,40 @@ function getChurchIdFromPath(pathname: string) {
     return decodeURIComponent(match[1] || '').trim();
 }
 
+function getAcceptedAuthHeader(request: IncomingMessage) {
+    const authHeader = String(request.headers.authorization || '').trim();
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+        return {
+            header: 'authorization' as const,
+            token: authHeader.slice(7).trim()
+        };
+    }
+
+    const apiKeyHeader = String(request.headers.apikey || '').trim();
+    if (apiKeyHeader) {
+        return {
+            header: 'apikey' as const,
+            token: apiKeyHeader
+        };
+    }
+
+    return {
+        header: null,
+        token: ''
+    };
+}
+
 function authenticate(request: IncomingMessage) {
     const expectedApiKey = getBridgeApiKey();
-    const providedApiKey = String(request.headers.apikey || '').trim();
-    return Boolean(expectedApiKey) && providedApiKey === expectedApiKey;
+    const auth = getAcceptedAuthHeader(request);
+
+    return {
+        ok: Boolean(expectedApiKey) && auth.token === expectedApiKey,
+        header: auth.header,
+        reason: expectedApiKey
+            ? (auth.token ? 'invalid_api_key' : 'missing_api_key')
+            : 'missing_server_api_key'
+    };
 }
 
 async function handleSyncRequest(request: IncomingMessage, response: ServerResponse, pathname: string) {
@@ -70,12 +109,15 @@ async function handleSyncRequest(request: IncomingMessage, response: ServerRespo
         return;
     }
 
-    if (!authenticate(request)) {
+    const auth = authenticate(request);
+    if (!auth.ok) {
         logHttp({
             event: 'http_sync_unauthorized',
             churchId,
             path: pathname,
-            method: request.method
+            method: request.method,
+            authHeader: auth.header,
+            reason: auth.reason
         });
         sendJson(response, 401, { error: 'unauthorized' });
         return;
@@ -90,7 +132,10 @@ async function handleSyncRequest(request: IncomingMessage, response: ServerRespo
             updated: result.updated,
             statusAnterior: result.statusAnterior,
             statusNovo: result.statusNovo,
-            error: result.error || null
+            error: result.error || null,
+            authHeader: auth.header,
+            path: pathname,
+            method: request.method
         });
         sendJson(response, 200, result);
     } catch (error) {
@@ -100,7 +145,8 @@ async function handleSyncRequest(request: IncomingMessage, response: ServerRespo
             churchId,
             path: pathname,
             method: request.method,
-            error: message
+            error: message,
+            authHeader: auth.header
         });
         sendJson(response, 500, { error: message });
     }
@@ -117,11 +163,27 @@ function createServer() {
         }
 
         if (method === 'GET' && pathname === '/health') {
-            sendJson(response, 200, { ok: true });
+            sendJson(response, 200, {
+                ok: true,
+                ...getBuildMetadata()
+            });
             return;
         }
 
-        sendJson(response, 404, { error: 'not_found' });
+        const churchId = getChurchIdFromPath(pathname);
+        const notFoundPayload = pathname.startsWith('/sync/')
+            ? { error: 'not_found', message: 'Use POST /sync/:churchId' }
+            : { error: 'not_found' };
+
+        logHttp({
+            event: 'http_not_found',
+            path: pathname,
+            method,
+            churchId: churchId || null,
+            reason: pathname.startsWith('/sync/') ? 'unsupported_method_or_path' : 'unknown_path'
+        });
+
+        sendJson(response, 404, notFoundPayload);
     });
 }
 
