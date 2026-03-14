@@ -173,7 +173,9 @@ export async function sendText(instanceName: string, to: string, message: string
             method: 'POST',
             body: {
                 number,
-                text: message
+                textMessage: {
+                    text: message
+                }
             }
         });
 
