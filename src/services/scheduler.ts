@@ -8,6 +8,7 @@ const DEFAULT_INTERVAL_MINUTES = 60;
 const DEFAULT_ADVANCE_HOURS = 24;
 const DEFAULT_SILENCE_START = '22:00';
 const DEFAULT_SILENCE_END = '07:00';
+
 function getTimeZone() {
     return process.env.TZ || 'America/Sao_Paulo';
 }
@@ -64,9 +65,9 @@ function isInsideSilenceWindow(silenceStart: string, silenceEnd: string, timeZon
 
     if (startMinutes < endMinutes) {
         return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
-    } else {
-        return currentMinutes >= startMinutes || currentMinutes <= endMinutes;
     }
+
+    return currentMinutes >= startMinutes || currentMinutes <= endMinutes;
 }
 
 function isInsideAdvanceWindow(cultDataHora: Date | null | undefined, advanceHours: number) {
@@ -95,10 +96,24 @@ function getPhoneFromMember(member: FirebaseFirestore.DocumentData | null | unde
 }
 
 type PendingItem = {
-    ref: FirebaseFirestore.DocumentReference;
+    refs: FirebaseFirestore.DocumentReference[];
     to: string;
     message: string;
 };
+
+function formatarLocal(item: FirebaseFirestore.DocumentData) {
+    const setor = String(item?.setorNome || '').trim();
+    const corredor = String(item?.corredorNome || '').trim();
+    const funcao = String(item?.funcaoNaEscala || '').trim();
+
+    if (corredor && corredor !== setor) {
+        return `${setor} (${corredor})`;
+    }
+
+    if (setor) return setor;
+
+    return funcao;
+}
 
 function formatAutoMessage(params: {
     nomeDoMembro: string;
@@ -106,7 +121,7 @@ function formatAutoMessage(params: {
     nomeCulto: string;
     nomeEscala: string;
     dataHoraCulto: Date;
-    setor: string;
+    local: string;
     token: string;
     timeZone: string;
 }) {
@@ -127,7 +142,7 @@ ${params.nomeIgreja}
 📝 Escala: ${params.nomeEscala}
 📅 Data: ${diaSemana}, ${data}
 ⏰ Horário: ${horario}
-📍Função: ${params.setor}
+📍 Local: ${params.local}
 ✅ Confirme sua presença pelo link abaixo:
 ${linkConfirmacao}
 Obrigado!`;
@@ -154,6 +169,18 @@ export function startScheduler() {
             jobRunning = false;
         }
     }, { timezone: timeZone } as any);
+}
+
+async function updateNotificationError(
+    itemDocs: FirebaseFirestore.QueryDocumentSnapshot[],
+    errorCode: 'sem_telefone' | 'send_error'
+) {
+    for (const itemDoc of itemDocs) {
+        const item = itemDoc.data();
+        if (item.notificadoErro !== errorCode) {
+            await itemDoc.ref.update({ notificado: false, notificadoErro: errorCode });
+        }
+    }
 }
 
 async function runBatchJob() {
@@ -224,6 +251,7 @@ async function runBatchJob() {
                 const nomeEscala = escala.titulo || nomeCulto;
 
                 const pendingItems: PendingItem[] = [];
+                const membroMap = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
 
                 for (const itemDoc of itemsSnapshot.docs) {
                     const item = itemDoc.data();
@@ -236,6 +264,14 @@ async function runBatchJob() {
                         continue;
                     }
 
+                    if (!membroMap.has(membroId)) {
+                        membroMap.set(membroId, []);
+                    }
+
+                    membroMap.get(membroId)?.push(itemDoc);
+                }
+
+                for (const [membroId, itemDocs] of membroMap.entries()) {
                     let membro = memberCache.get(membroId);
                     if (membro === undefined) {
                         const membroDoc = await db.collection(`igrejas/${churchId}/membros`).doc(membroId).get();
@@ -245,36 +281,39 @@ async function runBatchJob() {
 
                     const telefone = getPhoneFromMember(membro);
                     if (!telefone) {
-                        if (item.notificadoErro !== 'sem_telefone') {
-                            await itemDoc.ref.update({ notificado: false, notificadoErro: 'sem_telefone' });
-                        }
+                        await updateNotificationError(itemDocs, 'sem_telefone');
                         continue;
                     }
 
-                    const tokenId = String(item.tokenId || '').trim();
+                    const primeiroItemComToken = itemDocs.find(doc => String(doc.data().tokenId || '').trim());
+                    const tokenId = String(primeiroItemComToken?.data()?.tokenId || '').trim();
                     if (!tokenId) {
-                        if (item.notificadoErro !== 'send_error') {
-                            await itemDoc.ref.update({ notificado: false, notificadoErro: 'send_error' });
-                        }
+                        await updateNotificationError(itemDocs, 'send_error');
                         continue;
                     }
 
-                    const dataHoraMembro = parseIsoDate(item.dataCulto) || dataHoraCulto;
+                    const primeiroItem = itemDocs[0].data();
+                    const dataHoraMembro = parseIsoDate(primeiroItem.dataCulto) || dataHoraCulto;
                     if (!dataHoraMembro) continue;
 
+                    const local = itemDocs
+                        .map(doc => formatarLocal(doc.data()))
+                        .filter(Boolean)
+                        .join(' | ');
+
                     const msg = formatAutoMessage({
-                        nomeDoMembro: item.membroNome || 'Membro',
+                        nomeDoMembro: primeiroItem.membroNome || 'Membro',
                         nomeIgreja,
                         nomeCulto,
                         nomeEscala,
                         dataHoraCulto: dataHoraMembro,
-                        setor: item.funcaoNaEscala || item.setorNome || '',
+                        local,
                         token: tokenId,
                         timeZone
                     });
 
                     pendingItems.push({
-                        ref: itemDoc.ref,
+                        refs: itemDocs.map(doc => doc.ref),
                         to: telefone,
                         message: msg
                     });
@@ -290,14 +329,16 @@ async function runBatchJob() {
 
                     for (let i = 0; i < pendingItems.length; i++) {
                         const sendResult = result.results[i];
-                        const docRef = pendingItems[i].ref;
+                        const docRefs = pendingItems[i].refs;
 
                         if (sendResult.status === 'sent') {
-                            await docRef.update({
-                                notificado: true,
-                                notificadoEm: admin.firestore.FieldValue.serverTimestamp(),
-                                notificadoErro: null
-                            });
+                            for (const docRef of docRefs) {
+                                await docRef.update({
+                                    notificado: true,
+                                    notificadoEm: admin.firestore.FieldValue.serverTimestamp(),
+                                    notificadoErro: null
+                                });
+                            }
                             continue;
                         }
 
@@ -307,10 +348,12 @@ async function runBatchJob() {
                                 ? 'numero_invalido'
                                 : 'send_error';
 
-                        await docRef.update({
-                            notificado: false,
-                            notificadoErro: mappedError
-                        });
+                        for (const docRef of docRefs) {
+                            await docRef.update({
+                                notificado: false,
+                                notificadoErro: mappedError
+                            });
+                        }
                     }
                 } catch (error) {
                     console.error(`Error sending batch for church ${churchId} escala ${escalaDoc.id}`, error);
