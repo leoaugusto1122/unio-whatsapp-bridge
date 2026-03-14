@@ -69,14 +69,18 @@ export async function listEnabledChurches(): Promise<ChurchDoc[]> {
     try {
         const snapshot = await db.collection('igrejas')
             .where('whatsappAutomation.enabled', '==', true)
+            .where('whatsappAutomation.connected', '==', true)
             .get();
 
         return snapshot.docs.map(doc => ({ id: doc.id, data: doc.data() }));
     } catch (error) {
-        console.warn('Enabled churches query failed; falling back to full scan:', error);
+        console.warn('Enabled+connected churches query failed; falling back to full scan:', error);
         const snapshot = await db.collection('igrejas').get();
         return snapshot.docs
             .map(doc => ({ id: doc.id, data: doc.data() }))
-            .filter(doc => doc.data?.whatsappAutomation?.enabled === true);
+            .filter(doc =>
+                doc.data?.whatsappAutomation?.enabled === true
+                && doc.data?.whatsappAutomation?.connected === true
+            );
     }
 }

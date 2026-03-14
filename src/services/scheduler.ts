@@ -69,13 +69,36 @@ function isInsideSilenceWindow(silenceStart: string, silenceEnd: string, timeZon
     }
 }
 
-function isInsideAdvanceWindow(cultDataHora: any, advanceHours: number) {
-    if (!cultDataHora?.toDate) return false;
-    const cultTimeMs = cultDataHora.toDate().getTime();
+function isInsideAdvanceWindow(cultDataHora: Date | null | undefined, advanceHours: number) {
+    if (!cultDataHora || Number.isNaN(cultDataHora.getTime())) return false;
+    const cultTimeMs = cultDataHora.getTime();
     const startMs = cultTimeMs - (advanceHours * 60 * 60 * 1000);
     const nowMs = Date.now();
     return nowMs >= startMs && nowMs <= cultTimeMs;
 }
+
+function parseIsoDate(value: unknown) {
+    if (value instanceof Date) {
+        return Number.isNaN(value.getTime()) ? null : value;
+    }
+
+    if (typeof value !== 'string' || !value.trim()) {
+        return null;
+    }
+
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getPhoneFromMember(member: FirebaseFirestore.DocumentData | null | undefined) {
+    return String(member?.telefone || member?.phone || member?.celular || '').trim();
+}
+
+type PendingItem = {
+    ref: FirebaseFirestore.DocumentReference;
+    to: string;
+    message: string;
+};
 
 function formatAutoMessage(params: {
     nomeDoMembro: string;
@@ -144,6 +167,8 @@ async function runBatchJob() {
             const churchId = church.id;
             const churchData = church.data;
             const config = churchData?.whatsappAutomation || {};
+            const cultCache = new Map<string, FirebaseFirestore.DocumentData | null>();
+            const memberCache = new Map<string, FirebaseFirestore.DocumentData | null>();
 
             const syncResult = await syncChurchConnectionStatus(churchId, 'scheduler_job');
 
@@ -172,8 +197,21 @@ async function runBatchJob() {
 
             for (const escalaDoc of escalasSnapshot.docs) {
                 const escala = escalaDoc.data();
+                const cultoId = String(escala.cultoId || '').trim();
 
-                if (!isInsideAdvanceWindow(escala.dataHoraCulto, advanceHours)) continue;
+                if (!cultoId) continue;
+
+                let culto = cultCache.get(cultoId);
+                if (culto === undefined) {
+                    const cultoDoc = await db.collection(`igrejas/${churchId}/cultos`).doc(cultoId).get();
+                    culto = cultoDoc.exists ? (cultoDoc.data() || null) : null;
+                    cultCache.set(cultoId, culto);
+                }
+
+                if (!culto) continue;
+
+                const dataHoraCulto = parseIsoDate(culto.data);
+                if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) continue;
 
                 const itemsSnapshot = await db.collection(`igrejas/${churchId}/escalas/${escalaDoc.id}/items`)
                     .where('notificado', '==', false)
@@ -181,53 +219,78 @@ async function runBatchJob() {
 
                 if (itemsSnapshot.empty) continue;
 
-                const nomeIgreja = escala.nomeIgreja || churchData.nome || 'Igreja';
-                const nomeCulto = escala.nomeCulto || 'Culto';
-                const nomeEscala = escala.nome || escala.nomeEscala || nomeCulto;
+                const nomeIgreja = churchData.nome || 'Igreja';
+                const nomeCulto = culto.nome || escala.titulo || 'Culto';
+                const nomeEscala = escala.titulo || nomeCulto;
 
-                const batchToaster: { to: string, message: string }[] = [];
-                const itemDocsList: any[] = [];
+                const pendingItems: PendingItem[] = [];
 
                 for (const itemDoc of itemsSnapshot.docs) {
                     const item = itemDoc.data();
+                    const membroId = String(item.membroId || '').trim();
 
-                    if (!item.telefone) {
+                    if (!membroId) {
                         if (item.notificadoErro !== 'sem_telefone') {
                             await itemDoc.ref.update({ notificado: false, notificadoErro: 'sem_telefone' });
                         }
                         continue;
                     }
 
-                    if (!item.token) {
+                    let membro = memberCache.get(membroId);
+                    if (membro === undefined) {
+                        const membroDoc = await db.collection(`igrejas/${churchId}/membros`).doc(membroId).get();
+                        membro = membroDoc.exists ? (membroDoc.data() || null) : null;
+                        memberCache.set(membroId, membro);
+                    }
+
+                    const telefone = getPhoneFromMember(membro);
+                    if (!telefone) {
+                        if (item.notificadoErro !== 'sem_telefone') {
+                            await itemDoc.ref.update({ notificado: false, notificadoErro: 'sem_telefone' });
+                        }
+                        continue;
+                    }
+
+                    const tokenId = String(item.tokenId || '').trim();
+                    if (!tokenId) {
                         if (item.notificadoErro !== 'send_error') {
                             await itemDoc.ref.update({ notificado: false, notificadoErro: 'send_error' });
                         }
                         continue;
                     }
 
+                    const dataHoraMembro = parseIsoDate(item.dataCulto) || dataHoraCulto;
+                    if (!dataHoraMembro) continue;
+
                     const msg = formatAutoMessage({
-                        nomeDoMembro: item.nomeDoMembro || 'Membro',
+                        nomeDoMembro: item.membroNome || 'Membro',
                         nomeIgreja,
                         nomeCulto,
                         nomeEscala,
-                        dataHoraCulto: escala.dataHoraCulto.toDate(),
-                        setor: item.setor || '',
-                        token: item.token,
+                        dataHoraCulto: dataHoraMembro,
+                        setor: item.funcaoNaEscala || item.setorNome || '',
+                        token: tokenId,
                         timeZone
                     });
 
-                    batchToaster.push({ to: item.telefone, message: msg });
-                    itemDocsList.push(itemDoc);
+                    pendingItems.push({
+                        ref: itemDoc.ref,
+                        to: telefone,
+                        message: msg
+                    });
                 }
 
-                if (batchToaster.length === 0) continue;
+                if (pendingItems.length === 0) continue;
 
                 try {
-                    const result = await sendBatchText(churchId, batchToaster);
+                    const result = await sendBatchText(
+                        churchId,
+                        pendingItems.map(item => ({ to: item.to, message: item.message }))
+                    );
 
-                    for (let i = 0; i < batchToaster.length; i++) {
+                    for (let i = 0; i < pendingItems.length; i++) {
                         const sendResult = result.results[i];
-                        const docRef = itemDocsList[i].ref;
+                        const docRef = pendingItems[i].ref;
 
                         if (sendResult.status === 'sent') {
                             await docRef.update({
