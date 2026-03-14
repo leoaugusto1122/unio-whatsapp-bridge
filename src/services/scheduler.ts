@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import { db } from './firestore.js';
-import { getInstanceStatus, sendBatchMessages } from './baileys.js';
+import { getInstanceStatus, sendBatchText } from './evolution.js';
 import admin from 'firebase-admin';
 
 const DEFAULT_INTERVAL_MINUTES = 60;
@@ -160,7 +160,14 @@ async function runBatchJob() {
             const churchData = doc.data();
             const config = churchData?.whatsappAutomation || {};
 
-            const status = await getInstanceStatus(churchId);
+            let status;
+            try {
+                status = await getInstanceStatus(churchId);
+            } catch (error) {
+                console.error(`Failed to read Evolution connection state for church ${churchId}:`, error);
+                continue;
+            }
+
             if (status.status !== 'connected') {
                 console.log(`Church ${churchId} disconnected. Job skipped.`);
                 continue;
@@ -232,7 +239,7 @@ async function runBatchJob() {
                 if (batchToaster.length === 0) continue;
 
                 try {
-                    const result = await sendBatchMessages(churchId, batchToaster);
+                    const result = await sendBatchText(churchId, batchToaster);
 
                     for (let i = 0; i < batchToaster.length; i++) {
                         const sendResult = result.results[i];

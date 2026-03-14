@@ -1,12 +1,6 @@
-import express from 'express';
-import cors from 'cors';
 import dotenv from 'dotenv';
-import authMiddleware from './middleware/auth.js';
-import instanceRoutes from './routes/instance.js';
-import sendRoutes from './routes/send.js';
-import healthRoutes from './routes/health.js';
 import { startScheduler } from './services/scheduler.js';
-import { bootstrapInstancesFromSessions } from './services/baileys.js';
+import { validateEvolutionConfig } from './services/evolution.js';
 
 if (process.env.NODE_ENV !== 'production') {
     dotenv.config();
@@ -16,29 +10,22 @@ if (!process.env.TZ) {
     process.env.TZ = 'America/Sao_Paulo';
 }
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+function registerSignalHandlers() {
+    const shutdown = (signal: NodeJS.Signals) => {
+        console.log(`Received ${signal}. Shutting down scheduler worker.`);
+        process.exit(0);
+    };
 
-app.use(cors());
-app.use(express.json());
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+}
 
-// Public routes
-app.use('/health', healthRoutes);
+function bootstrap() {
+    validateEvolutionConfig();
+    registerSignalHandlers();
 
-// Protected routes
-app.use('/instance', authMiddleware, instanceRoutes);
-app.use('/', authMiddleware, sendRoutes);
-
-app.listen(PORT, async () => {
-    console.log(`Server is running on port ${PORT}`);
-
-    try {
-        await bootstrapInstancesFromSessions();
-    } catch (error) {
-        console.error('Failed to bootstrap instances from sessions:', error);
-    }
-
+    console.log('Starting WhatsApp scheduler worker');
     startScheduler();
-});
+}
 
-export default app;
+bootstrap();
