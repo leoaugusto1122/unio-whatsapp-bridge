@@ -1,0 +1,12 @@
+services:
+  bridge:
+    build: .
+    container_name: unio-bridge
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.bridge
+    environment:
+      - NODE_ENV=production
+      - TZ=America/Sao_Paulo
