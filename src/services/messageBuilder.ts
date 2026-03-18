@@ -10,8 +10,13 @@ function capitalizeFirst(text: string) {
 export type EventLocation = {
     name?: string;
     formatted_address?: string;
-    maps_url?: string;
+    lat?: number;
+    lng?: number;
 };
+
+export function buildMapsUrl(lat: number, lng: number): string {
+    return `https://maps.google.com/?q=${lat},${lng}`;
+}
 
 export type MessageParams = {
     nomeDoMembro: string;
@@ -27,14 +32,16 @@ export type MessageParams = {
 function getValidLocation(candidate: unknown): EventLocation | null {
     if (!candidate || typeof candidate !== 'object') return null;
 
-    const location = candidate as EventLocation;
-    const mapsUrl = String(location.maps_url || '').trim();
-    if (!mapsUrl) return null;
+    const loc = candidate as { name?: unknown; formatted_address?: unknown; lat?: unknown; lng?: unknown };
+    const lat = Number(loc.lat);
+    const lng = Number(loc.lng);
+    if (!isFinite(lat) || !isFinite(lng)) return null;
 
     return {
-        name: String(location.name || '').trim(),
-        formatted_address: String(location.formatted_address || '').trim(),
-        maps_url: mapsUrl
+        name: String(loc.name || '').trim(),
+        formatted_address: String(loc.formatted_address || '').trim(),
+        lat,
+        lng
     };
 }
 
@@ -50,8 +57,9 @@ export function resolveEventLocation(culto: unknown, igreja: unknown): EventLoca
 
 function formatLocationBlock(location?: EventLocation | null): string {
     const resolved = getValidLocation(location);
-    if (!resolved?.maps_url) return '';
+    if (resolved?.lat == null || resolved?.lng == null) return '';
 
+    const mapsUrl = buildMapsUrl(resolved.lat, resolved.lng);
     const address = resolved.formatted_address || '';
     const label = resolved.name
         ? address
@@ -60,10 +68,10 @@ function formatLocationBlock(location?: EventLocation | null): string {
         : address;
 
     if (!label) {
-        return `\n📍 ${resolved.maps_url}`;
+        return `\n📍 ${mapsUrl}`;
     }
 
-    return `\n*Local:* ${label}\n📍 ${resolved.maps_url}`;
+    return `\n*Local:* ${label}\n📍 ${mapsUrl}`;
 }
 
 export function buildAutoMessage(params: MessageParams): string {

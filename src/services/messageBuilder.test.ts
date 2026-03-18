@@ -18,14 +18,16 @@ test('resolveEventLocation prioritizes culto.localEvento over igreja.enderecoMap
             localEvento: {
                 name: 'Evento',
                 formatted_address: 'Rua Evento, 1',
-                maps_url: 'https://maps.example/evento'
+                lat: -23.4,
+                lng: -51.9
             }
         },
         {
             enderecoMaps: {
                 name: 'Sede',
                 formatted_address: 'Rua Sede, 2',
-                maps_url: 'https://maps.example/sede'
+                lat: -23.5,
+                lng: -52.0
             }
         }
     );
@@ -33,7 +35,8 @@ test('resolveEventLocation prioritizes culto.localEvento over igreja.enderecoMap
     assert.deepEqual(location, {
         name: 'Evento',
         formatted_address: 'Rua Evento, 1',
-        maps_url: 'https://maps.example/evento'
+        lat: -23.4,
+        lng: -51.9
     });
 });
 
@@ -44,7 +47,8 @@ test('resolveEventLocation falls back to igreja.enderecoMaps when evento locatio
             enderecoMaps: {
                 name: 'Sede',
                 formatted_address: 'Rua Sede, 2',
-                maps_url: 'https://maps.example/sede'
+                lat: -23.5,
+                lng: -52.0
             }
         }
     );
@@ -52,17 +56,17 @@ test('resolveEventLocation falls back to igreja.enderecoMaps when evento locatio
     assert.deepEqual(location, {
         name: 'Sede',
         formatted_address: 'Rua Sede, 2',
-        maps_url: 'https://maps.example/sede'
+        lat: -23.5,
+        lng: -52.0
     });
 });
 
-test('resolveEventLocation returns null when no valid maps url exists', () => {
+test('resolveEventLocation returns null when no lat/lng exists', () => {
     const location = resolveEventLocation(
         {
             localEvento: {
                 name: 'Evento',
-                formatted_address: 'Rua Evento, 1',
-                maps_url: '   '
+                formatted_address: 'Rua Evento, 1'
             }
         },
         {
@@ -109,13 +113,14 @@ test('buildAutoMessage appends event location block when localEvento wins', () =
         location: {
             name: 'Sitio Primavera',
             formatted_address: 'Rod. PR-317, Km 12, Maringa - PR',
-            maps_url: 'https://maps.example/evento'
+            lat: -23.4,
+            lng: -51.9
         }
     });
 
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/maps\.example\/evento/
+        /\*Função:\* Louvor\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/maps\.google\.com\/\?q=-23\.4,-51\.9/
     );
 });
 
@@ -127,12 +132,13 @@ test('buildAutoMessage appends church location block when fallback location is u
         location: {
             name: '',
             formatted_address: 'Rua da Sede, 123',
-            maps_url: 'https://maps.example/sede'
+            lat: -23.5,
+            lng: -52.0
         }
     });
 
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/maps\.example\/sede/
+        /\*Função:\* Louvor\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/maps\.google\.com\/\?q=-23\.5,-52/
     );
 });
