@@ -25,6 +25,12 @@ type SendResult = {
     timestamp?: string;
 };
 
+export type CreateInstanceResult = {
+    instanceId: string;
+    qrCode: string | null;
+    qrCodeExpiry: number;
+};
+
 class EvolutionApiError extends Error {
     readonly statusCode: number;
     readonly payload: unknown;
@@ -151,10 +157,62 @@ export async function getInstanceStatus(instanceName: string) {
     const state = parseConnectionState(payload);
 
     return {
-        churchId: instanceName,
+        instanceName,
         status: state === 'open' ? 'connected' as const : 'disconnected' as const,
-        state
+        state,
+        connectedSince: null as string | null
     };
+}
+
+export async function createInstance(instanceName: string): Promise<CreateInstanceResult> {
+    const payload = await evolutionRequest<any>('/instance/create', {
+        method: 'POST',
+        body: {
+            instanceName,
+            qrcode: true,
+            integration: 'WHATSAPP-BAILEYS'
+        }
+    });
+
+    const qrCode = payload?.qrcode?.base64 || payload?.base64 || null;
+
+    return {
+        instanceId: instanceName,
+        qrCode,
+        qrCodeExpiry: 60
+    };
+}
+
+export async function getQRCode(instanceName: string): Promise<{ qrCode: string | null; qrCodeExpiry: number }> {
+    const payload = await evolutionRequest<any>(`/instance/connect/${encodeURIComponent(instanceName)}`);
+    const qrCode = payload?.base64 || payload?.qrcode?.base64 || null;
+
+    return {
+        qrCode,
+        qrCodeExpiry: 60
+    };
+}
+
+export async function deleteInstance(instanceName: string): Promise<void> {
+    await evolutionRequest(`/instance/delete/${encodeURIComponent(instanceName)}`, {
+        method: 'DELETE'
+    });
+}
+
+export async function checkNumberOnWhatsApp(instanceName: string, phone: string): Promise<boolean> {
+    try {
+        const number = normalizePhoneDigits(phone);
+        const payload = await evolutionRequest<any>(`/chat/whatsappNumbers/${encodeURIComponent(instanceName)}`, {
+            method: 'POST',
+            body: { numbers: [number] }
+        });
+
+        const results: any[] = Array.isArray(payload) ? payload : (payload?.data || []);
+        const entry = results.find((r: any) => r.exists !== undefined);
+        return entry?.exists === true;
+    } catch {
+        return true; // on error assume exists to avoid silent drops
+    }
 }
 
 export async function sendText(instanceName: string, to: string, message: string): Promise<SendResult> {

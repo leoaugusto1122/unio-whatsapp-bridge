@@ -1,8 +1,14 @@
 import dotenv from 'dotenv';
-import http, { IncomingMessage, ServerResponse } from 'node:http';
+import express from 'express';
 import { startScheduler } from './services/scheduler.js';
 import { validateEvolutionConfig } from './services/evolution.js';
-import { startPeriodicConnectionStatusSyncJob, syncChurchConnectionStatus } from './services/connection-sync.js';
+import { syncChurchConnectionStatus } from './services/connection-sync.js';
+import { requireApiKey } from './middleware/auth.js';
+import { requireAdminKey } from './middleware/adminAuth.js';
+import healthRouter from './routes/health.js';
+import sendRouter from './routes/send.js';
+import automationRouter from './routes/automation.js';
+import adminRouter from './routes/admin.js';
 
 if (process.env.NODE_ENV !== 'production') {
     dotenv.config();
@@ -10,6 +16,57 @@ if (process.env.NODE_ENV !== 'production') {
 
 if (!process.env.TZ) {
     process.env.TZ = 'America/Sao_Paulo';
+}
+
+function getPort() {
+    const rawPort = Number.parseInt(process.env.PORT || '', 10);
+    return Number.isFinite(rawPort) && rawPort > 0 ? rawPort : 3000;
+}
+
+function createApp() {
+    const app = express();
+
+    app.use(express.json());
+
+    // Request logger
+    app.use((req, _res, next) => {
+        console.log(JSON.stringify({
+            timestamp: new Date().toISOString(),
+            event: 'http_request',
+            method: req.method,
+            path: req.path
+        }));
+        next();
+    });
+
+    // Public
+    app.use('/health', healthRouter);
+
+    // Authenticated routes
+    app.use('/send', requireApiKey, sendRouter);
+    app.use('/automation', requireApiKey, automationRouter);
+
+    // Legacy sync endpoint (kept for backward compatibility)
+    app.post('/sync/:churchId', requireApiKey, async (req, res) => {
+        const churchId = String(req.params.churchId);
+        try {
+            const result = await syncChurchConnectionStatus(churchId, 'config_screen');
+            res.json(result);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown error';
+            res.status(500).json({ error: message });
+        }
+    });
+
+    // Admin routes — require both apikey + x-admin-key
+    app.use('/admin', requireApiKey, requireAdminKey, adminRouter);
+
+    // 404
+    app.use((_req, res) => {
+        res.status(404).json({ error: 'not_found' });
+    });
+
+    return app;
 }
 
 function registerSignalHandlers() {
@@ -22,182 +79,18 @@ function registerSignalHandlers() {
     process.on('SIGTERM', shutdown);
 }
 
-function getPort() {
-    const rawPort = Number.parseInt(process.env.PORT || '', 10);
-    return Number.isFinite(rawPort) && rawPort > 0 ? rawPort : 3000;
-}
-
-function getBridgeApiKey() {
-    const explicitApiKey = process.env.API_KEY?.trim();
-    if (explicitApiKey) return explicitApiKey;
-    return process.env.EVOLUTION_API_KEY?.trim() || '';
-}
-
-function getBuildMetadata() {
-    return {
-        service: 'bridge',
-        version: process.env.APP_VERSION?.trim() || null,
-        commit: process.env.BUILD_COMMIT?.trim() || null,
-        syncRouteEnabled: true
-    };
-}
-
-function logHttp(payload: Record<string, unknown>) {
-    console.log(JSON.stringify({
-        timestamp: new Date().toISOString(),
-        ...payload
-    }));
-}
-
-function sendJson(response: ServerResponse, statusCode: number, payload: unknown) {
-    response.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
-    response.end(JSON.stringify(payload));
-}
-
-function getChurchIdFromPath(pathname: string) {
-    const match = pathname.match(/^\/sync\/([^/]+)$/);
-    if (!match) return '';
-    return decodeURIComponent(match[1] || '').trim();
-}
-
-function getAcceptedAuthHeader(request: IncomingMessage) {
-    const authHeader = String(request.headers.authorization || '').trim();
-    if (authHeader.toLowerCase().startsWith('bearer ')) {
-        return {
-            header: 'authorization' as const,
-            token: authHeader.slice(7).trim()
-        };
-    }
-
-    const apiKeyHeader = String(request.headers.apikey || '').trim();
-    if (apiKeyHeader) {
-        return {
-            header: 'apikey' as const,
-            token: apiKeyHeader
-        };
-    }
-
-    return {
-        header: null,
-        token: ''
-    };
-}
-
-function authenticate(request: IncomingMessage) {
-    const expectedApiKey = getBridgeApiKey();
-    const auth = getAcceptedAuthHeader(request);
-
-    return {
-        ok: Boolean(expectedApiKey) && auth.token === expectedApiKey,
-        header: auth.header,
-        reason: expectedApiKey
-            ? (auth.token ? 'invalid_api_key' : 'missing_api_key')
-            : 'missing_server_api_key'
-    };
-}
-
-async function handleSyncRequest(request: IncomingMessage, response: ServerResponse, pathname: string) {
-    const churchId = getChurchIdFromPath(pathname);
-
-    if (!churchId) {
-        logHttp({
-            event: 'http_sync_invalid_request',
-            path: pathname,
-            method: request.method
-        });
-        sendJson(response, 400, { error: 'churchId is required' });
-        return;
-    }
-
-    const auth = authenticate(request);
-    if (!auth.ok) {
-        logHttp({
-            event: 'http_sync_unauthorized',
-            churchId,
-            path: pathname,
-            method: request.method,
-            authHeader: auth.header,
-            reason: auth.reason
-        });
-        sendJson(response, 401, { error: 'unauthorized' });
-        return;
-    }
-
-    try {
-        const result = await syncChurchConnectionStatus(churchId, 'config_screen');
-        logHttp({
-            event: 'http_sync_completed',
-            churchId,
-            origin: result.origin,
-            updated: result.updated,
-            statusAnterior: result.statusAnterior,
-            statusNovo: result.statusNovo,
-            error: result.error || null,
-            authHeader: auth.header,
-            path: pathname,
-            method: request.method
-        });
-        sendJson(response, 200, result);
-    } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        logHttp({
-            event: 'http_sync_failed',
-            churchId,
-            path: pathname,
-            method: request.method,
-            error: message,
-            authHeader: auth.header
-        });
-        sendJson(response, 500, { error: message });
-    }
-}
-
-function createServer() {
-    return http.createServer(async (request, response) => {
-        const method = String(request.method || 'GET').toUpperCase();
-        const pathname = new URL(request.url || '/', 'http://localhost').pathname;
-
-        if (method === 'POST' && pathname.startsWith('/sync/')) {
-            await handleSyncRequest(request, response, pathname);
-            return;
-        }
-
-        if (method === 'GET' && pathname === '/health') {
-            sendJson(response, 200, {
-                ok: true,
-                ...getBuildMetadata()
-            });
-            return;
-        }
-
-        const churchId = getChurchIdFromPath(pathname);
-        const notFoundPayload = pathname.startsWith('/sync/')
-            ? { error: 'not_found', message: 'Use POST /sync/:churchId' }
-            : { error: 'not_found' };
-
-        logHttp({
-            event: 'http_not_found',
-            path: pathname,
-            method,
-            churchId: churchId || null,
-            reason: pathname.startsWith('/sync/') ? 'unsupported_method_or_path' : 'unknown_path'
-        });
-
-        sendJson(response, 404, notFoundPayload);
-    });
-}
-
 function bootstrap() {
     validateEvolutionConfig();
     registerSignalHandlers();
 
     const port = getPort();
-    const server = createServer();
+    const app = createApp();
 
-    console.log(`Starting WhatsApp bridge on port ${port}`);
     startScheduler();
-    startPeriodicConnectionStatusSyncJob();
-    server.listen(port);
+
+    app.listen(port, () => {
+        console.log(`WhatsApp bridge listening on port ${port}`);
+    });
 }
 
 bootstrap();
