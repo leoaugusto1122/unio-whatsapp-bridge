@@ -85,6 +85,12 @@ function isInsideAdvanceWindow(cultDataHora: Date | null | undefined, advanceHou
 }
 
 function parseIsoDate(value: unknown) {
+    // Firestore Timestamp object
+    if (value && typeof value === 'object' && typeof (value as any).toDate === 'function') {
+        const d = (value as any).toDate() as Date;
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
     if (value instanceof Date) {
         return Number.isNaN(value.getTime()) ? null : value;
     }
@@ -95,6 +101,11 @@ function parseIsoDate(value: unknown) {
 
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isEventInFuture(date: Date | null | undefined) {
+    if (!date) return false;
+    return date.getTime() > Date.now();
 }
 
 function getPhoneFromMember(member: FirebaseFirestore.DocumentData | null | undefined) {
@@ -216,7 +227,7 @@ async function runBatchJob() {
             const advanceHours = resolveAdvanceHours(config);
 
             const escalasSnapshot = await db.collection(`igrejas/${churchId}/escalas`)
-                .where('status', '==', 'publicada')
+                .where('status', 'in', ['publicada', 'agendado'])
                 .get();
 
             for (const escalaDoc of escalasSnapshot.docs) {
@@ -235,6 +246,11 @@ async function runBatchJob() {
                 if (!culto) continue;
 
                 const dataHoraCulto = parseIsoDate(culto.data);
+
+                // Rejeitar eventos passados
+                if (!isEventInFuture(dataHoraCulto)) continue;
+
+                // Verificar janela de antecedência
                 if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) continue;
 
                 const itemsSnapshot = await db.collection(`igrejas/${churchId}/escalas/${escalaDoc.id}/items`)
