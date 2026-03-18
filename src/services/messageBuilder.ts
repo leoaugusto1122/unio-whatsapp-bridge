@@ -15,7 +15,7 @@ export type EventLocation = {
 };
 
 export function buildMapsUrl(lat: number, lng: number): string {
-    return `https://maps.google.com/?q=${lat},${lng}`;
+    return `https://www.google.com/maps?q=${lat},${lng}&hl=pt-BR`;
 }
 
 export type MessageParams = {
