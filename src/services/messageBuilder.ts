@@ -7,6 +7,12 @@ function capitalizeFirst(text: string) {
     return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+export type EventLocation = {
+    name?: string;
+    formatted_address?: string;
+    maps_url?: string;
+};
+
 export type MessageParams = {
     nomeDoMembro: string;
     nomeIgreja: string;
@@ -15,7 +21,50 @@ export type MessageParams = {
     dataHoraCulto: Date;
     local: string;
     token: string;
+    location?: EventLocation | null;
 };
+
+function getValidLocation(candidate: unknown): EventLocation | null {
+    if (!candidate || typeof candidate !== 'object') return null;
+
+    const location = candidate as EventLocation;
+    const mapsUrl = String(location.maps_url || '').trim();
+    if (!mapsUrl) return null;
+
+    return {
+        name: String(location.name || '').trim(),
+        formatted_address: String(location.formatted_address || '').trim(),
+        maps_url: mapsUrl
+    };
+}
+
+export function resolveEventLocation(culto: unknown, igreja: unknown): EventLocation | null {
+    const cultoLocation = getValidLocation((culto as { localEvento?: unknown } | null | undefined)?.localEvento);
+    if (cultoLocation) return cultoLocation;
+
+    const igrejaLocation = getValidLocation((igreja as { enderecoMaps?: unknown } | null | undefined)?.enderecoMaps);
+    if (igrejaLocation) return igrejaLocation;
+
+    return null;
+}
+
+function formatLocationBlock(location?: EventLocation | null): string {
+    const resolved = getValidLocation(location);
+    if (!resolved?.maps_url) return '';
+
+    const address = resolved.formatted_address || '';
+    const label = resolved.name
+        ? address
+            ? `${resolved.name} — ${address}`
+            : resolved.name
+        : address;
+
+    if (!label) {
+        return `\n📍 ${resolved.maps_url}`;
+    }
+
+    return `\n*Local:* ${label}\n📍 ${resolved.maps_url}`;
+}
 
 export function buildAutoMessage(params: MessageParams): string {
     const timeZone = getTimeZone();
@@ -32,6 +81,7 @@ export function buildAutoMessage(params: MessageParams): string {
     });
 
     const linkConfirmacao = `https://unioescala.web.app/confirmar?token=${params.token}`;
+    const locationBlock = formatLocationBlock(params.location);
 
     return `Olá, *${params.nomeDoMembro}*.
 
@@ -42,7 +92,7 @@ Você está escalado(a) para:
 
 *Data:* ${diaSemana}, ${data}
 *Horário:* ${horario}
-*Função:* ${params.local}
+*Função:* ${params.local}${locationBlock}
 
 ✅ *Confirme sua presença pelo link abaixo:*
 ${linkConfirmacao}

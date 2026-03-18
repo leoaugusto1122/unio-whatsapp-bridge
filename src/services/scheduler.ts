@@ -3,7 +3,7 @@ import admin from 'firebase-admin';
 import { db, listEnabledChurches, listPoolNumbers, updatePoolNumber, resetDailyMessageCounts, incrementNumberMessageCount } from './firestore.js';
 import { sendBatchText, getInstanceStatus } from './evolution.js';
 import { selectSenderForChurch } from './pool.js';
-import { buildAutoMessage, formatarLocal } from './messageBuilder.js';
+import { buildAutoMessage, formatarLocal, resolveEventLocation } from './messageBuilder.js';
 
 const DEFAULT_INTERVAL_MINUTES = 60;
 const DEFAULT_ADVANCE_HOURS = 24;
@@ -274,6 +274,7 @@ async function runBatchJob() {
                 const nomeIgreja = churchData.nome || 'Igreja';
                 const nomeCulto = culto.nome || escala.titulo || 'Culto';
                 const nomeEscala = escala.titulo || nomeCulto;
+                const location = resolveEventLocation(culto, churchData);
 
                 const pendingItems: PendingItem[] = [];
                 const membroMap = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
@@ -332,7 +333,8 @@ async function runBatchJob() {
                         nomeEscala,
                         dataHoraCulto: dataHoraMembro,
                         local,
-                        token: tokenId
+                        token: tokenId,
+                        location
                     });
 
                     pendingItems.push({
