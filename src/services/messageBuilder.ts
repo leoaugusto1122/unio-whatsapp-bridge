@@ -15,7 +15,7 @@ export type EventLocation = {
 };
 
 export function buildMapsUrl(lat: number, lng: number): string {
-    return `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+    return `geo:${lat},${lng}`;
 }
 
 export type MessageParams = {

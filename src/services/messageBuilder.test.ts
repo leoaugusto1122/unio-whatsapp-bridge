@@ -120,7 +120,7 @@ test('buildAutoMessage appends event location block when localEvento wins', () =
 
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/waze\.com\/ul\?ll=-23\.4,-51\.9&navigate=yes/
+        /\*Função:\* Louvor\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 geo:-23\.4,-51\.9/
     );
 });
 
@@ -139,6 +139,6 @@ test('buildAutoMessage appends church location block when fallback location is u
 
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/waze\.com\/ul\?ll=-23\.5,-52&navigate=yes/
+        /\*Função:\* Louvor\n\*Local:\* Rua da Sede, 123\n📍 geo:-23\.5,-52/
     );
 });
