@@ -105,9 +105,8 @@ Obrigado!`
     );
 });
 
-test('buildAutoMessage uses PUBLIC_URL for maps link when set', () => {
+test('buildAutoMessage appends event location block when localEvento wins', () => {
     process.env.TZ = 'America/Sao_Paulo';
-    process.env.PUBLIC_URL = 'http://47.79.36.116:3000';
 
     const message = buildAutoMessage({
         ...baseParams,
@@ -121,15 +120,12 @@ test('buildAutoMessage uses PUBLIC_URL for maps link when set', () => {
 
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 http:\/\/47\.79\.36\.116:3000\/maps\?lat=-23\.4&lng=-51\.9/
+        /\*Função:\* Louvor\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/www\.openstreetmap\.org\/\?mlat=-23\.4&mlon=-51\.9&zoom=16/
     );
-
-    delete process.env.PUBLIC_URL;
 });
 
-test('buildAutoMessage falls back to geo: URI when PUBLIC_URL is not set', () => {
+test('buildAutoMessage appends church location block when fallback location is used', () => {
     process.env.TZ = 'America/Sao_Paulo';
-    delete process.env.PUBLIC_URL;
 
     const message = buildAutoMessage({
         ...baseParams,
@@ -143,6 +139,6 @@ test('buildAutoMessage falls back to geo: URI when PUBLIC_URL is not set', () =>
 
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Rua da Sede, 123\n📍 geo:-23\.5,-52/
+        /\*Função:\* Louvor\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/www\.openstreetmap\.org\/\?mlat=-23\.5&mlon=-52&zoom=16/
     );
 });
