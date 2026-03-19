@@ -15,6 +15,10 @@ export type EventLocation = {
 };
 
 export function buildMapsUrl(lat: number, lng: number): string {
+    const publicUrl = String(process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
+    if (publicUrl) {
+        return `${publicUrl}/maps?lat=${lat}&lng=${lng}`;
+    }
     return `geo:${lat},${lng}`;
 }
 

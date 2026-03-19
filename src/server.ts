@@ -42,6 +42,34 @@ function createApp() {
     // Public
     app.use('/health', healthRouter);
 
+    // Maps redirect — opens native navigation app chooser on device
+    app.get('/maps', (req, res) => {
+        const lat = parseFloat(String(req.query.lat || ''));
+        const lng = parseFloat(String(req.query.lng || ''));
+
+        if (!isFinite(lat) || !isFinite(lng)) {
+            return res.status(400).send('Invalid coordinates');
+        }
+
+        const geoUri = `geo:${lat},${lng}`;
+        res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Localização do Evento</title>
+  <meta property="og:title" content="Localização do Evento">
+  <meta property="og:description" content="Toque para abrir no seu app de navegação">
+  <meta http-equiv="refresh" content="0;url=${geoUri}">
+</head>
+<body>
+  <p>Abrindo app de navegação...</p>
+  <p><a href="${geoUri}">Toque aqui se não abrir automaticamente</a></p>
+  <script>window.location.href = '${geoUri}';</script>
+</body>
+</html>`);
+    });
+
     // Authenticated routes
     app.use('/send', requireApiKey, sendRouter);
     app.use('/automation', requireApiKey, automationRouter);
