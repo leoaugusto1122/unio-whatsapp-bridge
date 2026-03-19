@@ -15,7 +15,7 @@ export type EventLocation = {
 };
 
 export function buildMapsUrl(lat: number, lng: number): string {
-    return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}&zoom=16`;
+    return `https://maps.google.com/?q=${lat},${lng}`;
 }
 
 export type MessageParams = {
@@ -100,10 +100,10 @@ Você está escalado(a) para:
 
 *Data:* ${diaSemana}, ${data}
 *Horário:* ${horario}
-*Função:* ${params.local}${locationBlock}
+*Função:* ${params.local}
 
 ✅ *Confirme sua presença pelo link abaixo:*
-${linkConfirmacao}
+${linkConfirmacao}${locationBlock}
 
 Obrigado!`;
 }

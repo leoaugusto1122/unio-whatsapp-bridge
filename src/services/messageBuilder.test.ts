@@ -105,7 +105,7 @@ Obrigado!`
     );
 });
 
-test('buildAutoMessage appends event location block when localEvento wins', () => {
+test('buildAutoMessage puts location block after confirmation link', () => {
     process.env.TZ = 'America/Sao_Paulo';
 
     const message = buildAutoMessage({
@@ -118,9 +118,14 @@ test('buildAutoMessage appends event location block when localEvento wins', () =
         }
     });
 
+    // confirmation link must come before the maps URL
+    const confirmIdx = message.indexOf('unioescala.web.app');
+    const mapsIdx = message.indexOf('maps.google.com');
+    assert.ok(confirmIdx < mapsIdx, 'confirmation link should precede maps URL');
+
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/www\.openstreetmap\.org\/\?mlat=-23\.4&mlon=-51\.9&zoom=16/
+        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/maps\.google\.com\/\?q=-23\.4,-51\.9/
     );
 });
 
@@ -139,6 +144,6 @@ test('buildAutoMessage appends church location block when fallback location is u
 
     assert.match(
         message,
-        /\*Função:\* Louvor\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/www\.openstreetmap\.org\/\?mlat=-23\.5&mlon=-52&zoom=16/
+        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/maps\.google\.com\/\?q=-23\.5,-52/
     );
 });
