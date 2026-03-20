@@ -13,7 +13,7 @@ router.post('/', async (req, res) => {
         return;
     }
 
-    const sender = await selectSenderForChurch(churchId);
+    const sender = await selectSenderForChurch(churchId, 1);
     if (!sender) {
         res.status(503).json({
             status: 'failed',

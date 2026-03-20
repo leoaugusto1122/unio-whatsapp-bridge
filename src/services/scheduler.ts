@@ -269,6 +269,23 @@ function groupItemsByEscala(items: FirebaseFirestore.QueryDocumentSnapshot[]) {
     return groups;
 }
 
+export function groupItemDocsByMember(itemDocs: FirebaseFirestore.QueryDocumentSnapshot[]) {
+    const membroMap = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
+
+    for (const itemDoc of itemDocs) {
+        const membroId = String(itemDoc.data().membroId || '').trim();
+        if (!membroId) continue;
+
+        if (!membroMap.has(membroId)) {
+            membroMap.set(membroId, []);
+        }
+
+        membroMap.get(membroId)?.push(itemDoc);
+    }
+
+    return membroMap;
+}
+
 async function updateNotificationError(
     itemDocs: FirebaseFirestore.QueryDocumentSnapshot[],
     errorCode: 'sem_telefone' | 'send_error'
@@ -503,24 +520,13 @@ export async function runBatchJob() {
 
         stats.eligibleItems += group.itemDocs.length;
 
-        const sender = await selectSenderForChurch(churchId);
-        if (!sender) {
-            console.warn(JSON.stringify({
-                timestamp: new Date().toISOString(),
-                event: 'scheduler_no_sender',
-                churchId,
-                escalaId: group.escalaId
-            }));
-            continue;
-        }
-
         const nomeIgreja = churchData.nome || 'Igreja';
         const nomeCulto = culto.nome || escala.titulo || 'Culto';
         const nomeEscala = escala.titulo || nomeCulto;
         const location = resolveEventLocation(culto, churchData);
 
         const pendingItems: PendingItem[] = [];
-        const membroMap = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
+        const membroMap = groupItemDocsByMember(group.itemDocs);
 
         for (const itemDoc of group.itemDocs) {
             const item = itemDoc.data();
@@ -532,11 +538,6 @@ export async function runBatchJob() {
                 }
                 continue;
             }
-
-            if (!membroMap.has(membroId)) {
-                membroMap.set(membroId, []);
-            }
-            membroMap.get(membroId)?.push(itemDoc);
         }
 
         for (const [membroId, itemDocs] of membroMap.entries()) {
@@ -578,7 +579,8 @@ export async function runBatchJob() {
                 dataHoraCulto: dataHoraMembro,
                 local,
                 token: tokenId,
-                location
+                location,
+                segmento: churchData.segmento
             });
 
             pendingItems.push({
@@ -589,6 +591,18 @@ export async function runBatchJob() {
         }
 
         if (pendingItems.length === 0) continue;
+
+        const sender = await selectSenderForChurch(churchId, pendingItems.length);
+        if (!sender) {
+            console.warn(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                event: 'scheduler_no_sender',
+                churchId,
+                escalaId: group.escalaId,
+                pendingItems: pendingItems.length
+            }));
+            continue;
+        }
 
         try {
             const result = await sendBatchText(

@@ -46,6 +46,12 @@ export type ChurchDoc = {
 
 export type PoolNumberStatus = 'connected' | 'disconnected' | 'banned';
 
+export type PoolNumberAntiBan = {
+    hourWindowStartedAt: string | null;
+    hourCount: number;
+    lastHourlyBlockAt: string | null;
+};
+
 export type PoolNumber = {
     numberId: string;
     phoneNumber: string;
@@ -57,6 +63,7 @@ export type PoolNumber = {
     messagesToday: number;
     totalMessages: number;
     notes: string;
+    antiBan: PoolNumberAntiBan;
 };
 
 // ─── Church helpers ───────────────────────────────────────────────────────────
@@ -115,6 +122,7 @@ function getPoolRef(numberId: string) {
 
 function docToPoolNumber(doc: FirebaseFirestore.DocumentSnapshot): PoolNumber {
     const d = doc.data() || {};
+    const antiBan = d.antiBan || {};
     return {
         numberId: doc.id,
         phoneNumber: d.phoneNumber || '',
@@ -125,7 +133,12 @@ function docToPoolNumber(doc: FirebaseFirestore.DocumentSnapshot): PoolNumber {
         lastUsedAt: d.lastUsedAt || null,
         messagesToday: d.messagesToday || 0,
         totalMessages: d.totalMessages || 0,
-        notes: d.notes || ''
+        notes: d.notes || '',
+        antiBan: {
+            hourWindowStartedAt: antiBan.hourWindowStartedAt || null,
+            hourCount: antiBan.hourCount || 0,
+            lastHourlyBlockAt: antiBan.lastHourlyBlockAt || null
+        }
     };
 }
 
@@ -161,6 +174,86 @@ export async function updatePoolNumber(numberId: string, fields: Partial<Omit<Po
     const ref = getPoolRef(numberId);
     if (!ref) throw new Error('Firestore not initialized');
     await ref.update(fields as FirebaseFirestore.UpdateData<any>);
+}
+
+export type HourlyReservationResult = {
+    allowed: boolean;
+    reservedSlots: number;
+    remainingSlots: number;
+    hourCount: number;
+    windowStartedAt: string;
+};
+
+export function resolveHourlyWindowState(
+    antiBan: Partial<PoolNumberAntiBan> | null | undefined,
+    now: Date
+) {
+    const startedAt = antiBan?.hourWindowStartedAt ? new Date(antiBan.hourWindowStartedAt) : null;
+    const currentCount = Number(antiBan?.hourCount || 0);
+    const isValidStart = startedAt && Number.isFinite(startedAt.getTime());
+    const isSameWindow = Boolean(isValidStart && (now.getTime() - startedAt.getTime()) < (60 * 60 * 1000));
+
+    if (isSameWindow && startedAt) {
+        return {
+            windowStartedAt: startedAt.toISOString(),
+            hourCount: currentCount
+        };
+    }
+
+    return {
+        windowStartedAt: now.toISOString(),
+        hourCount: 0
+    };
+}
+
+export async function reserveHourlyMessageSlots(
+    numberId: string,
+    requestedSlots: number,
+    maxHourly: number,
+    now = new Date()
+): Promise<HourlyReservationResult> {
+    if (!db) throw new Error('Firestore not initialized');
+
+    const ref = getPoolRef(numberId);
+    if (!ref) throw new Error('Firestore not initialized');
+
+    return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(ref);
+        if (!snapshot.exists) {
+            throw new Error(`Pool number ${numberId} not found`);
+        }
+
+        const data = snapshot.data() || {};
+        const antiBan = resolveHourlyWindowState(data.antiBan || {}, now);
+        const nextCount = antiBan.hourCount + requestedSlots;
+
+        if (nextCount > maxHourly) {
+            transaction.update(ref, {
+                'antiBan.lastHourlyBlockAt': now.toISOString()
+            });
+
+            return {
+                allowed: false,
+                reservedSlots: 0,
+                remainingSlots: Math.max(0, maxHourly - antiBan.hourCount),
+                hourCount: antiBan.hourCount,
+                windowStartedAt: antiBan.windowStartedAt
+            };
+        }
+
+        transaction.update(ref, {
+            'antiBan.hourWindowStartedAt': antiBan.windowStartedAt,
+            'antiBan.hourCount': nextCount
+        });
+
+        return {
+            allowed: true,
+            reservedSlots: requestedSlots,
+            remainingSlots: Math.max(0, maxHourly - nextCount),
+            hourCount: nextCount,
+            windowStartedAt: antiBan.windowStartedAt
+        };
+    });
 }
 
 export async function deletePoolNumber(numberId: string): Promise<void> {

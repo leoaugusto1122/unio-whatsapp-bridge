@@ -14,6 +14,11 @@ export type EventLocation = {
     lng?: number;
 };
 
+export type SegmentoNormalizado = 'igreja' | 'neutro';
+
+const RELIGIOUS_GREETINGS = ['Olá, irmão', 'Paz do Senhor,', 'Oi, tudo bem?'] as const;
+const NEUTRAL_GREETINGS = ['Olá,', 'Oi,', 'Bom dia,', 'Boa tarde,'] as const;
+
 export function buildMapsUrl(lat: number, lng: number): string {
     return `https://maps.google.com/?q=${lat},${lng}`;
 }
@@ -27,6 +32,9 @@ export type MessageParams = {
     local: string;
     token: string;
     location?: EventLocation | null;
+    segmento?: string | null;
+    now?: Date;
+    randomFn?: () => number;
 };
 
 function getValidLocation(candidate: unknown): EventLocation | null {
@@ -43,6 +51,53 @@ function getValidLocation(candidate: unknown): EventLocation | null {
         lat,
         lng
     };
+}
+
+export function normalizeSegmento(raw: unknown): SegmentoNormalizado {
+    const value = String(raw || '').trim().toLowerCase();
+    if (!value || value === 'igreja') return 'igreja';
+    return 'neutro';
+}
+
+function getGreetingHour(now: Date, timeZone: string) {
+    const formatter = new Intl.DateTimeFormat('pt-BR', {
+        timeZone,
+        hour: '2-digit',
+        hour12: false
+    });
+
+    const parts = formatter.formatToParts(now);
+    return Number(parts.find(part => part.type === 'hour')?.value || '0');
+}
+
+function isGreetingCompatibleWithHour(greeting: string, hour: number) {
+    if (greeting === 'Bom dia,') return hour < 12;
+    if (greeting === 'Boa tarde,') return hour >= 12;
+    return true;
+}
+
+export function resolveGreeting(
+    segmento: unknown,
+    options?: {
+        now?: Date;
+        randomFn?: () => number;
+        timeZone?: string;
+    }
+) {
+    const timeZone = options?.timeZone || getTimeZone();
+    const now = options?.now || new Date();
+    const randomFn = options?.randomFn || Math.random;
+    const normalized = normalizeSegmento(segmento);
+    const greetings = normalized === 'igreja' ? RELIGIOUS_GREETINGS : NEUTRAL_GREETINGS;
+    const idx = Math.floor(randomFn() * greetings.length);
+    const picked = greetings[idx] || greetings[0];
+
+    if (normalized === 'neutro') {
+        const hour = getGreetingHour(now, timeZone);
+        return isGreetingCompatibleWithHour(picked, hour) ? picked : 'Olá,';
+    }
+
+    return picked;
 }
 
 export function resolveEventLocation(culto: unknown, igreja: unknown): EventLocation | null {
@@ -63,7 +118,7 @@ function formatLocationBlock(location?: EventLocation | null): string {
     const address = resolved.formatted_address || '';
     const label = resolved.name
         ? address
-            ? `${resolved.name} — ${address}`
+            ? `${resolved.name} - ${address}`
             : resolved.name
         : address;
 
@@ -76,6 +131,11 @@ function formatLocationBlock(location?: EventLocation | null): string {
 
 export function buildAutoMessage(params: MessageParams): string {
     const timeZone = getTimeZone();
+    const greeting = resolveGreeting(params.segmento, {
+        now: params.now,
+        randomFn: params.randomFn,
+        timeZone
+    });
 
     const diaSemana = capitalizeFirst(
         params.dataHoraCulto.toLocaleDateString('pt-BR', { weekday: 'long', timeZone })
@@ -91,7 +151,7 @@ export function buildAutoMessage(params: MessageParams): string {
     const linkConfirmacao = `https://unioescala.web.app/confirmar?token=${params.token}`;
     const locationBlock = formatLocationBlock(params.location);
 
-    return `Olá, *${params.nomeDoMembro}*.
+    return `${greeting} *${params.nomeDoMembro}*.
 
 Você está escalado(a) para:
 🏛 *${params.nomeIgreja}*

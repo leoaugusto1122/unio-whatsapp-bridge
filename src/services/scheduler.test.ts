@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createAdaptiveJobLoop,
+    groupItemDocsByMember,
     listPendingNotificationItems,
     parseItemDocumentPath
 } from './scheduler.js';
@@ -19,6 +20,27 @@ test('parseItemDocumentPath extracts church and escala identifiers from item pat
 
 test('parseItemDocumentPath returns null for unexpected paths', () => {
     assert.equal(parseItemDocumentPath('igrejas/igreja-a/items/item-c'), null);
+});
+
+test('groupItemDocsByMember consolidates multiple items of the same member inside one escala', () => {
+    function makeDoc(membroId: string, suffix: string) {
+        return {
+            ref: { path: `igrejas/a/escalas/1/items/${suffix}` },
+            data() {
+                return { membroId };
+            }
+        };
+    }
+
+    const groups = groupItemDocsByMember([
+        makeDoc('m1', 'a') as any,
+        makeDoc('m1', 'b') as any,
+        makeDoc('m2', 'c') as any
+    ]);
+
+    assert.equal(groups.size, 2);
+    assert.equal(groups.get('m1')?.length, 2);
+    assert.equal(groups.get('m2')?.length, 1);
 });
 
 test('listPendingNotificationItems applies collectionGroup, cutoff and limit', async () => {

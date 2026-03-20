@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAutoMessage, resolveEventLocation } from './messageBuilder.js';
+import { buildAutoMessage, normalizeSegmento, resolveEventLocation, resolveGreeting } from './messageBuilder.js';
 
 const baseParams = {
     nomeDoMembro: 'Nome',
@@ -80,14 +80,19 @@ test('resolveEventLocation returns null when no lat/lng exists', () => {
     assert.equal(location, null);
 });
 
-test('buildAutoMessage preserves the current message when location is null', () => {
+test('buildAutoMessage keeps the body and confirmation link while varying the greeting', () => {
     process.env.TZ = 'America/Sao_Paulo';
 
-    const message = buildAutoMessage({ ...baseParams, location: null });
+    const message = buildAutoMessage({
+        ...baseParams,
+        location: null,
+        segmento: 'igreja',
+        randomFn: () => 0
+    });
 
     assert.equal(
         message,
-        `Olá, *Nome*.
+        `Olá, irmão *Nome*.
 
 Você está escalado(a) para:
 🏛 *Igreja*
@@ -115,17 +120,18 @@ test('buildAutoMessage puts location block after confirmation link', () => {
             formatted_address: 'Rod. PR-317, Km 12, Maringa - PR',
             lat: -23.4,
             lng: -51.9
-        }
+        },
+        segmento: 'igreja',
+        randomFn: () => 0
     });
 
-    // confirmation link must come before the maps URL
     const confirmIdx = message.indexOf('unioescala.web.app');
     const mapsIdx = message.indexOf('maps.google.com');
     assert.ok(confirmIdx < mapsIdx, 'confirmation link should precede maps URL');
 
     assert.match(
         message,
-        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\*Local:\* Sitio Primavera — Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/maps\.google\.com\/\?q=-23\.4,-51\.9/
+        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\*Local:\* Sitio Primavera - Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/maps\.google\.com\/\?q=-23\.4,-51\.9/
     );
 });
 
@@ -139,11 +145,56 @@ test('buildAutoMessage appends church location block when fallback location is u
             formatted_address: 'Rua da Sede, 123',
             lat: -23.5,
             lng: -52.0
-        }
+        },
+        segmento: 'igreja',
+        randomFn: () => 0
     });
 
     assert.match(
         message,
         /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/maps\.google\.com\/\?q=-23\.5,-52/
     );
+});
+
+test('normalizeSegmento maps igreja and empty values to religious greetings', () => {
+    assert.equal(normalizeSegmento('igreja'), 'igreja');
+    assert.equal(normalizeSegmento(''), 'igreja');
+    assert.equal(normalizeSegmento(undefined), 'igreja');
+});
+
+test('normalizeSegmento maps any non-igreja value to neutral greetings', () => {
+    assert.equal(normalizeSegmento('empresa'), 'neutro');
+    assert.equal(normalizeSegmento('staff'), 'neutro');
+    assert.equal(normalizeSegmento('empresa_staff'), 'neutro');
+    assert.equal(normalizeSegmento('outro'), 'neutro');
+});
+
+test('resolveGreeting uses religious set for igreja', () => {
+    const greeting = resolveGreeting('igreja', {
+        randomFn: () => 0,
+        now: new Date('2026-03-22T10:00:00.000Z'),
+        timeZone: 'America/Sao_Paulo'
+    });
+
+    assert.equal(greeting, 'Olá, irmão');
+});
+
+test('resolveGreeting uses neutral greetings for non-igreja values', () => {
+    const greeting = resolveGreeting('empresa', {
+        randomFn: () => 0.3,
+        now: new Date('2026-03-22T10:00:00.000Z'),
+        timeZone: 'America/Sao_Paulo'
+    });
+
+    assert.equal(greeting, 'Oi,');
+});
+
+test('resolveGreeting falls back from Boa tarde to Olá outside the compatible hour', () => {
+    const greeting = resolveGreeting('staff', {
+        randomFn: () => 0.99,
+        now: new Date('2026-03-22T10:00:00.000Z'),
+        timeZone: 'America/Sao_Paulo'
+    });
+
+    assert.equal(greeting, 'Olá,');
 });

@@ -51,7 +51,12 @@ router.post('/pool/add', async (req, res) => {
         lastUsedAt: null,
         messagesToday: 0,
         totalMessages: 0,
-        notes: notes || ''
+        notes: notes || '',
+        antiBan: {
+            hourWindowStartedAt: null,
+            hourCount: 0,
+            lastHourlyBlockAt: null
+        }
     });
 
     const instanceId = `unio_pool_${numberId}`;
