@@ -193,7 +193,10 @@ EVOLUTION_BASE_URL=http://localhost:8080
 EVOLUTION_API_KEY=unioescala_whatsapp
 FIREBASE_PROJECT_ID=unioescala
 FIREBASE_SERVICE_ACCOUNT={"type":"service_account",...}
-SCHEDULER_INTERVAL=60
+SCHEDULER_IDLE_DELAY_MINUTES=5
+SCHEDULER_ACTIVE_DELAY_MINUTES=1
+SCHEDULER_PENDING_BATCH_LIMIT=10
+SCHEDULER_LOOKBACK_HOURS=24
 MAX_DAILY_PER_NUMBER=150
 ```
 
@@ -225,7 +228,10 @@ curl http://localhost:3000/health
 | `EVOLUTION_API_KEY` | `unioescala_whatsapp` | API key da Evolution |
 | `FIREBASE_PROJECT_ID` | `unioescala` | ID do projeto Firebase |
 | `FIREBASE_SERVICE_ACCOUNT` | `{...json...}` | Credencial Firebase (JSON) |
-| `SCHEDULER_INTERVAL` | `60` | Intervalo do job em minutos |
+| `SCHEDULER_IDLE_DELAY_MINUTES` | `5` | Espera quando o ciclo nao encontra `items` |
+| `SCHEDULER_ACTIVE_DELAY_MINUTES` | `1` | Espera quando o ciclo encontra `items` para avaliar |
+| `SCHEDULER_PENDING_BATCH_LIMIT` | `10` | Limite de `items` lidos por ciclo |
+| `SCHEDULER_LOOKBACK_HOURS` | `24` | Janela principal por `createdAt` na fila de `items` |
 | `MAX_DAILY_PER_NUMBER` | `150` | Limite de mensagens por número por dia |
 
 **Para editar uma variável na VPS:**
@@ -301,6 +307,21 @@ Solução: verificar status dos números via `/admin/pool` e reconectar ou adici
 docker logs unio-bridge | grep "scheduler\|batch\|job"
 ```
 Verifique se há igrejas com `whatsappAutomation.enabled: true` no Firestore e escalas com `status: "publicada"`.
+
+### Indexes obrigatorios do Firestore
+O scheduler de notificacoes depende de um indice manual para `collectionGroup('items')`:
+
+- Indice definitivo da Fase 2: `notificado ASC` + `createdAt ASC`
+- Indice legado temporario: `notificado ASC` + `dataCulto ASC`, mantido apenas pelo fallback de transicao e removivel apos 15 dias estaveis
+
+Sem esse indice, o loop vai registrar erro de `FAILED_PRECONDITION` ao consultar a fila.
+
+Atualizacao da Fase 2:
+
+- O scheduler usa `createdAt` como filtro principal da fila.
+- O fallback por `dataCulto` e temporario, apenas para itens legados sem `createdAt`.
+- O indice definitivo requerido e `notificado ASC` + `createdAt ASC`.
+- O indice `notificado ASC` + `dataCulto ASC` permanece apenas durante a transicao e pode ser removido apos 15 dias estaveis.
 
 ### Reiniciar o container sem rebuild
 ```bash

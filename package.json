@@ -5,7 +5,7 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "npm run build && node dist/services/messageBuilder.test.js",
+    "test": "npm run build && node dist/services/messageBuilder.test.js && node dist/services/scheduler.test.js",
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",

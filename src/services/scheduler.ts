@@ -1,33 +1,52 @@
 import cron from 'node-cron';
 import admin from 'firebase-admin';
-import { db, listEnabledChurches, listPoolNumbers, updatePoolNumber, resetDailyMessageCounts, incrementNumberMessageCount } from './firestore.js';
+import {
+    db,
+    listEnabledChurches,
+    listPoolNumbers,
+    updatePoolNumber,
+    resetDailyMessageCounts,
+    incrementNumberMessageCount
+} from './firestore.js';
 import { sendBatchText, getInstanceStatus } from './evolution.js';
 import { selectSenderForChurch } from './pool.js';
 import { buildAutoMessage, formatarLocal, resolveEventLocation } from './messageBuilder.js';
 
-const DEFAULT_INTERVAL_MINUTES = 60;
+const DEFAULT_IDLE_DELAY_MINUTES = 5;
+const DEFAULT_ACTIVE_DELAY_MINUTES = 1;
+const DEFAULT_PENDING_BATCH_LIMIT = 10;
+const DEFAULT_LOOKBACK_HOURS = 24;
 const DEFAULT_ADVANCE_HOURS = 24;
 const DEFAULT_SILENCE_START = '22:00';
 const DEFAULT_SILENCE_END = '07:00';
+const ELIGIBLE_ESCALA_STATUSES = new Set(['publicada', 'agendado']);
+
+let monitorRunning = false;
 
 function getTimeZone() {
     return process.env.TZ || 'America/Sao_Paulo';
 }
 
-let jobRunning = false;
-let monitorRunning = false;
-
-function parseIntervalMinutes(raw: string | undefined) {
+function parsePositiveInt(raw: string | undefined, fallback: number, min = 1) {
     const parsed = Number.parseInt(raw || '', 10);
-    if (!Number.isFinite(parsed)) return DEFAULT_INTERVAL_MINUTES;
-    if (parsed === 60) return 60;
-    if (parsed >= 1 && parsed <= 59) return parsed;
-    return DEFAULT_INTERVAL_MINUTES;
+    if (!Number.isFinite(parsed) || parsed < min) return fallback;
+    return parsed;
 }
 
-function toCronExpression(intervalMinutes: number) {
-    if (intervalMinutes === 60) return '0 * * * *';
-    return `*/${intervalMinutes} * * * *`;
+function getIdleDelayMinutes() {
+    return parsePositiveInt(process.env.SCHEDULER_IDLE_DELAY_MINUTES, DEFAULT_IDLE_DELAY_MINUTES);
+}
+
+function getActiveDelayMinutes() {
+    return parsePositiveInt(process.env.SCHEDULER_ACTIVE_DELAY_MINUTES, DEFAULT_ACTIVE_DELAY_MINUTES);
+}
+
+function getPendingBatchLimit() {
+    return parsePositiveInt(process.env.SCHEDULER_PENDING_BATCH_LIMIT, DEFAULT_PENDING_BATCH_LIMIT);
+}
+
+function getLookbackHours() {
+    return parsePositiveInt(process.env.SCHEDULER_LOOKBACK_HOURS, DEFAULT_LOOKBACK_HOURS);
 }
 
 function getCurrentMinutesInTimeZone(timeZone: string) {
@@ -72,7 +91,6 @@ function resolveAdvanceHours(config: { advanceType?: string; advanceValue?: numb
         if (config.advanceType === 'days') return config.advanceValue * 24;
         return config.advanceValue;
     }
-    // backward compat: old advanceHours field
     return config.advanceHours || DEFAULT_ADVANCE_HOURS;
 }
 
@@ -85,7 +103,6 @@ function isInsideAdvanceWindow(cultDataHora: Date | null | undefined, advanceHou
 }
 
 function parseIsoDate(value: unknown) {
-    // Firestore Timestamp object
     if (value && typeof value === 'object' && typeof (value as any).toDate === 'function') {
         const d = (value as any).toDate() as Date;
         return Number.isNaN(d.getTime()) ? null : d;
@@ -118,6 +135,140 @@ type PendingItem = {
     message: string;
 };
 
+type FilterMode = 'createdAt' | 'createdAt+legacy';
+
+export type BatchJobStats = {
+    fetchedItems: number;
+    eligibleItems: number;
+    processedItems: number;
+    filterMode: FilterMode;
+};
+
+type AdaptiveSchedulerConfig = {
+    idleDelayMinutes: number;
+    activeDelayMinutes: number;
+};
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+type AdaptiveLoopDeps = {
+    executeBatchJob: () => Promise<BatchJobStats>;
+    setTimer: (callback: () => void, delayMs: number) => TimerHandle;
+    clearTimer: (timer: TimerHandle) => void;
+    log: (message: string) => void;
+    error: (message: string, error: unknown) => void;
+};
+
+type EscalaItemGroup = {
+    churchId: string;
+    escalaId: string;
+    itemDocs: FirebaseFirestore.QueryDocumentSnapshot[];
+};
+
+function getAdaptiveSchedulerConfig(): AdaptiveSchedulerConfig {
+    return {
+        idleDelayMinutes: getIdleDelayMinutes(),
+        activeDelayMinutes: getActiveDelayMinutes()
+    };
+}
+
+export function getLookbackStartDate(now: Date, lookbackHours: number) {
+    return new Date(now.getTime() - (lookbackHours * 60 * 60 * 1000));
+}
+
+export function parseItemDocumentPath(path: string) {
+    const parts = path.split('/');
+    if (parts.length !== 6) return null;
+    if (parts[0] !== 'igrejas' || parts[2] !== 'escalas' || parts[4] !== 'items') return null;
+
+    const churchId = String(parts[1] || '').trim();
+    const escalaId = String(parts[3] || '').trim();
+    const itemId = String(parts[5] || '').trim();
+    if (!churchId || !escalaId || !itemId) return null;
+
+    return { churchId, escalaId, itemId };
+}
+
+export async function listPendingNotificationItems(
+    database: Pick<FirebaseFirestore.Firestore, 'collectionGroup'> | null,
+    options?: {
+        now?: Date;
+        lookbackHours?: number;
+        limit?: number;
+    }
+) {
+    if (!database) return null;
+
+    const now = options?.now || new Date();
+    const lookbackHours = options?.lookbackHours ?? getLookbackHours();
+    const limit = options?.limit ?? getPendingBatchLimit();
+    const cutoff = admin.firestore.Timestamp.fromDate(getLookbackStartDate(now, lookbackHours));
+
+    const primarySnapshot = await database.collectionGroup('items')
+        .where('notificado', '==', false)
+        .where('createdAt', '>=', cutoff)
+        .limit(limit)
+        .get();
+
+    const docsByPath = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
+    for (const itemDoc of primarySnapshot.docs) {
+        docsByPath.set(itemDoc.ref.path, itemDoc);
+    }
+
+    let filterMode: FilterMode = 'createdAt';
+
+    if (docsByPath.size < limit) {
+        filterMode = 'createdAt+legacy';
+
+        const legacySnapshot = await database.collectionGroup('items')
+            .where('notificado', '==', false)
+            .where('dataCulto', '>=', cutoff)
+            .limit(limit - docsByPath.size)
+            .get();
+
+        for (const itemDoc of legacySnapshot.docs) {
+            if (docsByPath.size >= limit) break;
+            if (docsByPath.has(itemDoc.ref.path)) continue;
+            if (parseIsoDate(itemDoc.data().createdAt)) continue;
+
+            docsByPath.set(itemDoc.ref.path, itemDoc);
+        }
+    }
+
+    const docs = Array.from(docsByPath.values()).slice(0, limit);
+
+    return {
+        docs,
+        empty: docs.length === 0,
+        size: docs.length,
+        filterMode
+    };
+}
+
+function groupItemsByEscala(items: FirebaseFirestore.QueryDocumentSnapshot[]) {
+    const groups = new Map<string, EscalaItemGroup>();
+
+    for (const itemDoc of items) {
+        const parsed = parseItemDocumentPath(itemDoc.ref.path);
+        if (!parsed) continue;
+
+        const key = `${parsed.churchId}/${parsed.escalaId}`;
+        let group = groups.get(key);
+        if (!group) {
+            group = {
+                churchId: parsed.churchId,
+                escalaId: parsed.escalaId,
+                itemDocs: []
+            };
+            groups.set(key, group);
+        }
+
+        group.itemDocs.push(itemDoc);
+    }
+
+    return groups;
+}
+
 async function updateNotificationError(
     itemDocs: FirebaseFirestore.QueryDocumentSnapshot[],
     errorCode: 'sem_telefone' | 'send_error'
@@ -130,27 +281,101 @@ async function updateNotificationError(
     }
 }
 
-export function startScheduler() {
-    const intervalMinutes = parseIntervalMinutes(process.env.SCHEDULER_INTERVAL);
-    const expression = toCronExpression(intervalMinutes);
-    const timeZone = getTimeZone();
+export function createAdaptiveJobLoop(deps: AdaptiveLoopDeps, config: AdaptiveSchedulerConfig) {
+    let started = false;
+    let jobRunning = false;
+    let timer: TimerHandle | null = null;
 
-    console.log(`Starting scheduler with interval of ${intervalMinutes} minutes (cron="${expression}", tz="${timeZone}")`);
-
-    cron.schedule(expression, async () => {
-        if (jobRunning) {
-            console.log('Scheduled job already running; skipping this tick.');
-            return;
+    function schedule(delayMinutes: number) {
+        if (timer) {
+            deps.clearTimer(timer);
         }
+
+        timer = deps.setTimer(() => {
+            void runOnce();
+        }, delayMinutes * 60 * 1000);
+    }
+
+    async function runOnce() {
+        if (jobRunning) {
+            deps.log('Scheduled job already running; skipping this tick.');
+            return config.activeDelayMinutes;
+        }
+
         jobRunning = true;
+
         try {
-            await runBatchJob();
+            const stats = await deps.executeBatchJob();
+            const nextDelayMinutes = stats.fetchedItems > 0
+                ? config.activeDelayMinutes
+                : config.idleDelayMinutes;
+
+            if (stats.fetchedItems === 0) {
+                deps.log('Nenhum item encontrado. Aguardando 5 min...');
+            }
+
+            deps.log(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                event: 'scheduler_cycle_complete',
+                ...stats,
+                nextDelayMinutes
+            }));
+
+            schedule(nextDelayMinutes);
+            return nextDelayMinutes;
+        } catch (error) {
+            deps.error('Error in batch job:', error);
+
+            const nextDelayMinutes = config.idleDelayMinutes;
+            deps.log(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                event: 'scheduler_cycle_complete',
+                fetchedItems: 0,
+                eligibleItems: 0,
+                processedItems: 0,
+                filterMode: 'createdAt',
+                nextDelayMinutes,
+                failed: true
+            }));
+
+            schedule(nextDelayMinutes);
+            return nextDelayMinutes;
         } finally {
             jobRunning = false;
         }
-    }, { timezone: timeZone } as any);
+    }
 
-    // Pool health monitor — every 15 minutes
+    return {
+        start() {
+            if (started) return;
+            started = true;
+            void runOnce();
+        },
+        runOnce,
+        isJobRunning() {
+            return jobRunning;
+        }
+    };
+}
+
+export function startScheduler() {
+    const timeZone = getTimeZone();
+    const config = getAdaptiveSchedulerConfig();
+    const pendingBatchLimit = getPendingBatchLimit();
+    const lookbackHours = getLookbackHours();
+
+    console.log(
+        `Starting adaptive scheduler (idle=${config.idleDelayMinutes}m, active=${config.activeDelayMinutes}m, limit=${pendingBatchLimit}, lookback=${lookbackHours}h, tz="${timeZone}")`
+    );
+
+    createAdaptiveJobLoop({
+        executeBatchJob: () => runBatchJob(),
+        setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimer: timer => clearTimeout(timer),
+        log: message => console.log(message),
+        error: (message, error) => console.error(message, error)
+    }, config).start();
+
     cron.schedule('*/15 * * * *', async () => {
         if (monitorRunning) return;
         monitorRunning = true;
@@ -161,7 +386,6 @@ export function startScheduler() {
         }
     }, { timezone: timeZone } as any);
 
-    // Daily message counter reset — midnight
     cron.schedule('0 0 * * *', async () => {
         try {
             console.log('Resetting daily message counts for pool numbers');
@@ -202,188 +426,210 @@ async function monitorPool() {
     }
 }
 
-async function runBatchJob() {
-    if (!db) return;
+export async function runBatchJob() {
+    if (!db) {
+        return { fetchedItems: 0, eligibleItems: 0, processedItems: 0, filterMode: 'createdAt' as const };
+    }
 
-    try {
-        const timeZone = getTimeZone();
-        const churches = await listEnabledChurches();
+    const pendingItemsSnapshot = await listPendingNotificationItems(db);
+    if (!pendingItemsSnapshot || pendingItemsSnapshot.empty) {
+        return {
+            fetchedItems: 0,
+            eligibleItems: 0,
+            processedItems: 0,
+            filterMode: pendingItemsSnapshot?.filterMode || 'createdAt'
+        };
+    }
 
-        for (const church of churches) {
-            const churchId = church.id;
-            const churchData = church.data;
-            const config = churchData?.whatsappAutomation || {};
-            const cultCache = new Map<string, FirebaseFirestore.DocumentData | null>();
-            const memberCache = new Map<string, FirebaseFirestore.DocumentData | null>();
+    const stats: BatchJobStats = {
+        fetchedItems: pendingItemsSnapshot.size,
+        eligibleItems: 0,
+        processedItems: 0,
+        filterMode: pendingItemsSnapshot.filterMode
+    };
 
-            const silenceStart = config.silenceStart || DEFAULT_SILENCE_START;
-            const silenceEnd = config.silenceEnd || DEFAULT_SILENCE_END;
+    const timeZone = getTimeZone();
+    const churches = await listEnabledChurches();
+    const churchMap = new Map(churches.map(church => [church.id, church]));
+    const groupedItems = groupItemsByEscala(pendingItemsSnapshot.docs);
+    const escalaCache = new Map<string, FirebaseFirestore.DocumentData | null>();
+    const cultCache = new Map<string, FirebaseFirestore.DocumentData | null>();
+    const memberCache = new Map<string, FirebaseFirestore.DocumentData | null>();
 
-            if (isInsideSilenceWindow(silenceStart, silenceEnd, timeZone)) {
-                console.log(`Church ${churchId} in silence window. Skipping.`);
+    for (const group of groupedItems.values()) {
+        const church = churchMap.get(group.churchId);
+        if (!church) continue;
+
+        const churchId = group.churchId;
+        const churchData = church.data;
+        const config = churchData?.whatsappAutomation || {};
+        const silenceStart = config.silenceStart || DEFAULT_SILENCE_START;
+        const silenceEnd = config.silenceEnd || DEFAULT_SILENCE_END;
+
+        if (isInsideSilenceWindow(silenceStart, silenceEnd, timeZone)) {
+            console.log(`Church ${churchId} in silence window. Skipping.`);
+            continue;
+        }
+
+        const escalaKey = `${churchId}/${group.escalaId}`;
+        let escala = escalaCache.get(escalaKey);
+        if (escala === undefined) {
+            const escalaDoc = await db.collection(`igrejas/${churchId}/escalas`).doc(group.escalaId).get();
+            escala = escalaDoc.exists ? (escalaDoc.data() || null) : null;
+            escalaCache.set(escalaKey, escala);
+        }
+
+        if (!escala) continue;
+        if (!ELIGIBLE_ESCALA_STATUSES.has(String(escala.status || '').trim())) continue;
+
+        const cultoId = String(escala.cultoId || '').trim();
+        if (!cultoId) continue;
+
+        const cultKey = `${churchId}/${cultoId}`;
+        let culto = cultCache.get(cultKey);
+        if (culto === undefined) {
+            const cultoDoc = await db.collection(`igrejas/${churchId}/cultos`).doc(cultoId).get();
+            culto = cultoDoc.exists ? (cultoDoc.data() || null) : null;
+            cultCache.set(cultKey, culto);
+        }
+
+        if (!culto) continue;
+
+        const dataHoraCulto = parseIsoDate(culto.data);
+        if (!isEventInFuture(dataHoraCulto)) continue;
+
+        const advanceHours = resolveAdvanceHours(config);
+        if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) continue;
+
+        stats.eligibleItems += group.itemDocs.length;
+
+        const sender = await selectSenderForChurch(churchId);
+        if (!sender) {
+            console.warn(JSON.stringify({
+                timestamp: new Date().toISOString(),
+                event: 'scheduler_no_sender',
+                churchId,
+                escalaId: group.escalaId
+            }));
+            continue;
+        }
+
+        const nomeIgreja = churchData.nome || 'Igreja';
+        const nomeCulto = culto.nome || escala.titulo || 'Culto';
+        const nomeEscala = escala.titulo || nomeCulto;
+        const location = resolveEventLocation(culto, churchData);
+
+        const pendingItems: PendingItem[] = [];
+        const membroMap = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
+
+        for (const itemDoc of group.itemDocs) {
+            const item = itemDoc.data();
+            const membroId = String(item.membroId || '').trim();
+
+            if (!membroId) {
+                if (item.notificadoErro !== 'sem_telefone') {
+                    await itemDoc.ref.update({ notificado: false, notificadoErro: 'sem_telefone' });
+                }
                 continue;
             }
 
-            const advanceHours = resolveAdvanceHours(config);
+            if (!membroMap.has(membroId)) {
+                membroMap.set(membroId, []);
+            }
+            membroMap.get(membroId)?.push(itemDoc);
+        }
 
-            const escalasSnapshot = await db.collection(`igrejas/${churchId}/escalas`)
-                .where('status', 'in', ['publicada', 'agendado'])
-                .get();
+        for (const [membroId, itemDocs] of membroMap.entries()) {
+            const memberKey = `${churchId}/${membroId}`;
+            let membro = memberCache.get(memberKey);
+            if (membro === undefined) {
+                const membroDoc = await db.collection(`igrejas/${churchId}/membros`).doc(membroId).get();
+                membro = membroDoc.exists ? (membroDoc.data() || null) : null;
+                memberCache.set(memberKey, membro);
+            }
 
-            for (const escalaDoc of escalasSnapshot.docs) {
-                const escala = escalaDoc.data();
-                const cultoId = String(escala.cultoId || '').trim();
+            const telefone = getPhoneFromMember(membro);
+            if (!telefone) {
+                await updateNotificationError(itemDocs, 'sem_telefone');
+                continue;
+            }
 
-                if (!cultoId) continue;
+            const primeiroItemComToken = itemDocs.find(doc => String(doc.data().tokenId || '').trim());
+            const tokenId = String(primeiroItemComToken?.data()?.tokenId || '').trim();
+            if (!tokenId) {
+                await updateNotificationError(itemDocs, 'send_error');
+                continue;
+            }
 
-                let culto = cultCache.get(cultoId);
-                if (culto === undefined) {
-                    const cultoDoc = await db.collection(`igrejas/${churchId}/cultos`).doc(cultoId).get();
-                    culto = cultoDoc.exists ? (cultoDoc.data() || null) : null;
-                    cultCache.set(cultoId, culto);
-                }
+            const primeiroItem = itemDocs[0].data();
+            const dataHoraMembro = parseIsoDate(primeiroItem.dataCulto) || dataHoraCulto;
+            if (!dataHoraMembro) continue;
 
-                if (!culto) continue;
+            const local = itemDocs
+                .map(doc => formatarLocal(doc.data()))
+                .filter(Boolean)
+                .join(' | ');
 
-                const dataHoraCulto = parseIsoDate(culto.data);
+            const msg = buildAutoMessage({
+                nomeDoMembro: primeiroItem.membroNome || primeiroItem.nomeDoMembro || 'Membro',
+                nomeIgreja,
+                nomeCulto,
+                nomeEscala,
+                dataHoraCulto: dataHoraMembro,
+                local,
+                token: tokenId,
+                location
+            });
 
-                // Rejeitar eventos passados
-                if (!isEventInFuture(dataHoraCulto)) continue;
+            pendingItems.push({
+                refs: itemDocs.map(doc => doc.ref),
+                to: telefone,
+                message: msg
+            });
+        }
 
-                // Verificar janela de antecedência
-                if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) continue;
+        if (pendingItems.length === 0) continue;
 
-                const itemsSnapshot = await db.collection(`igrejas/${churchId}/escalas/${escalaDoc.id}/items`)
-                    .where('notificado', '==', false)
-                    .get();
+        try {
+            const result = await sendBatchText(
+                sender.instanceId,
+                pendingItems.map(item => ({ to: item.to, message: item.message }))
+            );
 
-                if (itemsSnapshot.empty) continue;
+            for (let i = 0; i < pendingItems.length; i++) {
+                const sendResult = result.results[i];
+                const docRefs = pendingItems[i].refs;
 
-                // Select a pool number for this batch
-                const sender = await selectSenderForChurch(churchId);
-                if (!sender) {
-                    console.warn(JSON.stringify({
-                        timestamp: new Date().toISOString(),
-                        event: 'scheduler_no_sender',
-                        churchId,
-                        escalaId: escalaDoc.id
-                    }));
+                if (sendResult.status === 'sent') {
+                    await incrementNumberMessageCount(sender.numberId);
+                    for (const docRef of docRefs) {
+                        await docRef.update({
+                            notificado: true,
+                            notificadoEm: admin.firestore.FieldValue.serverTimestamp(),
+                            notificadoErro: null
+                        });
+                    }
+
+                    stats.processedItems += docRefs.length;
                     continue;
                 }
 
-                const nomeIgreja = churchData.nome || 'Igreja';
-                const nomeCulto = culto.nome || escala.titulo || 'Culto';
-                const nomeEscala = escala.titulo || nomeCulto;
-                const location = resolveEventLocation(culto, churchData);
+                const failReason = String(sendResult.failReason || '');
+                const mappedError =
+                    failReason === 'numero_invalido' || failReason === 'telefone_invalido'
+                        ? 'numero_invalido'
+                        : 'send_error';
 
-                const pendingItems: PendingItem[] = [];
-                const membroMap = new Map<string, FirebaseFirestore.QueryDocumentSnapshot[]>();
-
-                for (const itemDoc of itemsSnapshot.docs) {
-                    const item = itemDoc.data();
-                    const membroId = String(item.membroId || '').trim();
-
-                    if (!membroId) {
-                        if (item.notificadoErro !== 'sem_telefone') {
-                            await itemDoc.ref.update({ notificado: false, notificadoErro: 'sem_telefone' });
-                        }
-                        continue;
-                    }
-
-                    if (!membroMap.has(membroId)) {
-                        membroMap.set(membroId, []);
-                    }
-                    membroMap.get(membroId)?.push(itemDoc);
-                }
-
-                for (const [membroId, itemDocs] of membroMap.entries()) {
-                    let membro = memberCache.get(membroId);
-                    if (membro === undefined) {
-                        const membroDoc = await db.collection(`igrejas/${churchId}/membros`).doc(membroId).get();
-                        membro = membroDoc.exists ? (membroDoc.data() || null) : null;
-                        memberCache.set(membroId, membro);
-                    }
-
-                    const telefone = getPhoneFromMember(membro);
-                    if (!telefone) {
-                        await updateNotificationError(itemDocs, 'sem_telefone');
-                        continue;
-                    }
-
-                    const primeiroItemComToken = itemDocs.find(doc => String(doc.data().tokenId || '').trim());
-                    const tokenId = String(primeiroItemComToken?.data()?.tokenId || '').trim();
-                    if (!tokenId) {
-                        await updateNotificationError(itemDocs, 'send_error');
-                        continue;
-                    }
-
-                    const primeiroItem = itemDocs[0].data();
-                    const dataHoraMembro = parseIsoDate(primeiroItem.dataCulto) || dataHoraCulto;
-                    if (!dataHoraMembro) continue;
-
-                    const local = itemDocs
-                        .map(doc => formatarLocal(doc.data()))
-                        .filter(Boolean)
-                        .join(' | ');
-
-                    const msg = buildAutoMessage({
-                        nomeDoMembro: primeiroItem.membroNome || primeiroItem.nomeDoMembro || 'Membro',
-                        nomeIgreja,
-                        nomeCulto,
-                        nomeEscala,
-                        dataHoraCulto: dataHoraMembro,
-                        local,
-                        token: tokenId,
-                        location
-                    });
-
-                    pendingItems.push({
-                        refs: itemDocs.map(doc => doc.ref),
-                        to: telefone,
-                        message: msg
-                    });
-                }
-
-                if (pendingItems.length === 0) continue;
-
-                try {
-                    const result = await sendBatchText(
-                        sender.instanceId,
-                        pendingItems.map(item => ({ to: item.to, message: item.message }))
-                    );
-
-                    for (let i = 0; i < pendingItems.length; i++) {
-                        const sendResult = result.results[i];
-                        const docRefs = pendingItems[i].refs;
-
-                        if (sendResult.status === 'sent') {
-                            await incrementNumberMessageCount(sender.numberId);
-                            for (const docRef of docRefs) {
-                                await docRef.update({
-                                    notificado: true,
-                                    notificadoEm: admin.firestore.FieldValue.serverTimestamp(),
-                                    notificadoErro: null
-                                });
-                            }
-                            continue;
-                        }
-
-                        const failReason = String(sendResult.failReason || '');
-                        const mappedError =
-                            failReason === 'numero_invalido' || failReason === 'telefone_invalido'
-                                ? 'numero_invalido'
-                                : 'send_error';
-
-                        for (const docRef of docRefs) {
-                            await docRef.update({ notificado: false, notificadoErro: mappedError });
-                        }
-                    }
-                } catch (error) {
-                    console.error(`Error sending batch for church ${churchId} escala ${escalaDoc.id}:`, error);
+                for (const docRef of docRefs) {
+                    await docRef.update({ notificado: false, notificadoErro: mappedError });
                 }
             }
+        } catch (error) {
+            console.error(`Error sending batch for church ${churchId} escala ${group.escalaId}:`, error);
         }
-    } catch (error) {
-        console.error('Error in batch job:', error);
     }
+
+    console.log(`[Scheduler] Processados ${stats.processedItems} itens (Filtro: ${stats.filterMode})`);
+
+    return stats;
 }

@@ -44,7 +44,10 @@ Obrigatorias:
 Opcionais:
 
 - `TZ`: fuso horario. Padrao `America/Sao_Paulo`.
-- `SCHEDULER_INTERVAL`: intervalo do job de envio automatico em minutos. Padrao `60`.
+- `SCHEDULER_IDLE_DELAY_MINUTES`: atraso quando nao ha itens pendentes. Padrao `5`.
+- `SCHEDULER_ACTIVE_DELAY_MINUTES`: atraso quando o ciclo encontra itens. Padrao `1`.
+- `SCHEDULER_PENDING_BATCH_LIMIT`: maximo de `items` avaliados por ciclo. Padrao `10`.
+- `SCHEDULER_LOOKBACK_HOURS`: janela principal por `createdAt` usada pela fila. Padrao `24`.
 - `SYNC_PERIODIC_JOB_ENABLED`: habilita reconciliacao periodica de conexao. Use `true` para ativar.
 - `SYNC_PERIODIC_JOB_CRON`: cron do job de reconciliacao periodica. Exemplo: `0 * * * *`.
 
@@ -61,8 +64,19 @@ Configure no servico:
 - `FIREBASE_PROJECT_ID`
 - `FIREBASE_SERVICE_ACCOUNT`
 - `TZ=America/Sao_Paulo`
+- `SCHEDULER_IDLE_DELAY_MINUTES=5`
+- `SCHEDULER_ACTIVE_DELAY_MINUTES=1`
+- `SCHEDULER_PENDING_BATCH_LIMIT=10`
+- `SCHEDULER_LOOKBACK_HOURS=24`
 - `SYNC_PERIODIC_JOB_ENABLED=true` se quiser reconciliacao periodica
 - `SYNC_PERIODIC_JOB_CRON=0 * * * *` para rodar a cada 1 hora
+
+## Firestore indexes
+
+O scheduler usa `collectionGroup('items')` com `notificado == false` e `createdAt >= cutoff` como source of truth da fila.
+
+- Indice definitivo da Fase 2: `notificado ASC` + `createdAt ASC`.
+- Indice legado temporario: `notificado ASC` + `dataCulto ASC`, mantido apenas para o fallback de transicao e removivel apos 15 dias estaveis.
 
 ## Fluxo de integracao
 
