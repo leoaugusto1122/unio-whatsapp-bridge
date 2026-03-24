@@ -204,11 +204,20 @@ export async function listPendingNotificationItems(
     const limit = options?.limit ?? getPendingBatchLimit();
     const cutoff = admin.firestore.Timestamp.fromDate(getLookbackStartDate(now, lookbackHours));
 
-    const primarySnapshot = await database.collectionGroup('items')
-        .where('notificado', '==', false)
-        .where('createdAt', '>=', cutoff)
-        .limit(limit)
-        .get();
+    let primarySnapshot;
+    try {
+        primarySnapshot = await database.collectionGroup('items')
+            .where('notificado', '==', false)
+            .where('createdAt', '>=', cutoff)
+            .limit(limit)
+            .get();
+    } catch (error: any) {
+        const code = String(error?.code || error?.details || error?.message || 'unknown');
+        if (code.includes('FAILED_PRECONDITION')) {
+            console.error('[Scheduler] Missing Firestore index for pending items query (createdAt).');
+        }
+        throw error;
+    }
 
     const docsByPath = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
     for (const itemDoc of primarySnapshot.docs) {
@@ -220,11 +229,20 @@ export async function listPendingNotificationItems(
     if (docsByPath.size < limit) {
         filterMode = 'createdAt+legacy';
 
-        const legacySnapshot = await database.collectionGroup('items')
-            .where('notificado', '==', false)
-            .where('dataCulto', '>=', cutoff)
-            .limit(limit - docsByPath.size)
-            .get();
+        let legacySnapshot;
+        try {
+            legacySnapshot = await database.collectionGroup('items')
+                .where('notificado', '==', false)
+                .where('dataCulto', '>=', cutoff)
+                .limit(limit - docsByPath.size)
+                .get();
+        } catch (error: any) {
+            const code = String(error?.code || error?.details || error?.message || 'unknown');
+            if (code.includes('FAILED_PRECONDITION')) {
+                console.error('[Scheduler] Missing Firestore index for pending items legacy query (dataCulto).');
+            }
+            throw error;
+        }
 
         for (const itemDoc of legacySnapshot.docs) {
             if (docsByPath.size >= limit) break;
@@ -475,7 +493,10 @@ export async function runBatchJob() {
 
     for (const group of groupedItems.values()) {
         const church = churchMap.get(group.churchId);
-        if (!church) continue;
+        if (!church) {
+            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_church_disabled', churchId: group.churchId, escalaId: group.escalaId }));
+            continue;
+        }
 
         const churchId = group.churchId;
         const churchData = church.data;
@@ -484,7 +505,7 @@ export async function runBatchJob() {
         const silenceEnd = config.silenceEnd || DEFAULT_SILENCE_END;
 
         if (isInsideSilenceWindow(silenceStart, silenceEnd, timeZone)) {
-            console.log(`Church ${churchId} in silence window. Skipping.`);
+            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_silence_window', churchId, escalaId: group.escalaId, silenceStart, silenceEnd }));
             continue;
         }
 
@@ -516,7 +537,10 @@ export async function runBatchJob() {
         if (!isEventInFuture(dataHoraCulto)) continue;
 
         const advanceHours = resolveAdvanceHours(config);
-        if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) continue;
+        if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) {
+            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_advance_window', churchId, escalaId: group.escalaId, cultoId, advanceHours }));
+            continue;
+        }
 
         stats.eligibleItems += group.itemDocs.length;
 
@@ -590,7 +614,10 @@ export async function runBatchJob() {
             });
         }
 
-        if (pendingItems.length === 0) continue;
+        if (pendingItems.length === 0) {
+            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_no_recipients', churchId, escalaId: group.escalaId }));
+            continue;
+        }
 
         const sender = await selectSenderForChurch(churchId, pendingItems.length);
         if (!sender) {
@@ -647,3 +674,8 @@ export async function runBatchJob() {
 
     return stats;
 }
+
+
+
+
+

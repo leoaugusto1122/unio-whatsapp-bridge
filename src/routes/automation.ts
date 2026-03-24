@@ -4,7 +4,6 @@ import { listConnectedPoolNumbers } from '../services/firestore.js';
 
 const router = Router();
 
-// POST /automation/register
 router.post('/register', async (req, res) => {
     const { churchId } = req.body || {};
 
@@ -14,10 +13,7 @@ router.post('/register', async (req, res) => {
     }
 
     const connected = await listConnectedPoolNumbers();
-    if (connected.length === 0) {
-        res.json({ registered: false, reason: 'no_numbers_available' });
-        return;
-    }
+    const serviceStatus = connected.length > 0 ? 'operational' : 'unavailable';
 
     if (db) {
         await db.collection('igrejas').doc(churchId).update({
@@ -25,10 +21,27 @@ router.post('/register', async (req, res) => {
         });
     }
 
-    res.json({ registered: true, churchId });
+    if (connected.length === 0) {
+        res.json({
+            churchId,
+            registered: false,
+            active: false,
+            serviceStatus,
+            senderAssigned: false,
+            reason: 'no_numbers_available'
+        });
+        return;
+    }
+
+    res.json({
+        churchId,
+        registered: true,
+        active: true,
+        serviceStatus,
+        senderAssigned: true
+    });
 });
 
-// POST /automation/unregister
 router.post('/unregister', async (req, res) => {
     const { churchId } = req.body || {};
 
@@ -46,19 +59,28 @@ router.post('/unregister', async (req, res) => {
     res.json({ unregistered: true, churchId });
 });
 
-// GET /automation/status/:churchId
 router.get('/status/:churchId', async (req, res) => {
     const { churchId } = req.params;
 
     const config = await getChurchWhatsappAutomation(churchId);
-    const active = config?.enabled === true;
+    const enabled = config?.enabled === true;
 
     const connected = await listConnectedPoolNumbers();
-    const serviceStatus = connected.length > 0
+    const hasConnectedSender = connected.length > 0;
+    const active = enabled && hasConnectedSender;
+    const registered = enabled;
+    const serviceStatus = hasConnectedSender
         ? 'operational'
-        : (active ? 'degraded' : 'unavailable');
+        : (enabled ? 'degraded' : 'unavailable');
 
-    res.json({ churchId, active, serviceStatus });
+    res.json({
+        churchId,
+        enabled,
+        registered,
+        active,
+        senderAssigned: hasConnectedSender,
+        serviceStatus
+    });
 });
 
 export default router;

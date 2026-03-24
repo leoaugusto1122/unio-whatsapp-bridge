@@ -23,15 +23,11 @@ if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_SERVICE_ACCOUNT) {
 
 export const db = admin.apps.length > 0 ? admin.firestore() : null;
 
-// ─── Church types ────────────────────────────────────────────────────────────
-
 export type ChurchWhatsappAutomation = {
     enabled?: boolean;
-    /** @deprecated pool-based architecture; kept for legacy connection-sync reads */
     connected?: boolean;
     advanceType?: 'hours' | 'days';
     advanceValue?: number;
-    /** @deprecated kept for backward compat reads */
     advanceHours?: number;
     silenceStart?: string;
     silenceEnd?: string;
@@ -41,8 +37,6 @@ export type ChurchDoc = {
     id: string;
     data: FirebaseFirestore.DocumentData;
 };
-
-// ─── Pool types ───────────────────────────────────────────────────────────────
 
 export type PoolNumberStatus = 'connected' | 'disconnected' | 'banned';
 
@@ -65,8 +59,6 @@ export type PoolNumber = {
     notes: string;
     antiBan: PoolNumberAntiBan;
 };
-
-// ─── Church helpers ───────────────────────────────────────────────────────────
 
 function getChurchRef(churchId: string) {
     if (!db) return null;
@@ -104,16 +96,15 @@ export async function listEnabledChurches(): Promise<ChurchDoc[]> {
             .get();
 
         return snapshot.docs.map(doc => ({ id: doc.id, data: doc.data() }));
-    } catch (error) {
-        console.warn('Enabled churches query failed; falling back to full scan:', error);
+    } catch (error: any) {
+        const code = String(error?.code || error?.details || error?.message || 'unknown');
+        console.warn('Enabled churches query failed; falling back to full scan:', code);
         const snapshot = await db.collection('igrejas').get();
         return snapshot.docs
             .map(doc => ({ id: doc.id, data: doc.data() }))
             .filter(doc => doc.data?.whatsappAutomation?.enabled === true);
     }
 }
-
-// ─── Pool helpers ─────────────────────────────────────────────────────────────
 
 function getPoolRef(numberId: string) {
     if (!db) return null;
