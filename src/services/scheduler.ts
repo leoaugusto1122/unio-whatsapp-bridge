@@ -87,14 +87,22 @@ function isInsideSilenceWindow(silenceStart: string, silenceEnd: string, timeZon
     return currentMinutes >= startMinutes || currentMinutes <= endMinutes;
 }
 
-function resolveAdvanceHours(config: { advanceType?: string; advanceValue?: string | number; advanceHours?: string | number }): number {
+type AdvanceHoursResolution = {
+    value: number;
+    source: 'new_schema' | 'legacy_schema' | 'default_fallback';
+};
+
+function resolveAdvanceHours(config: { advanceType?: string; advanceValue?: string | number; advanceHours?: string | number }): AdvanceHoursResolution {
     const val = config.advanceValue != null ? Number(config.advanceValue) : null;
     if (config.advanceType && val != null && !Number.isNaN(val)) {
-        if (config.advanceType === 'days') return val * 24;
-        return val;
+        const value = config.advanceType === 'days' ? val * 24 : val;
+        return { value, source: 'new_schema' };
     }
     const legacy = config.advanceHours != null ? Number(config.advanceHours) : null;
-    return (legacy != null && !Number.isNaN(legacy)) ? legacy : DEFAULT_ADVANCE_HOURS;
+    if (legacy != null && !Number.isNaN(legacy)) {
+        return { value: legacy, source: 'legacy_schema' };
+    }
+    return { value: DEFAULT_ADVANCE_HOURS, source: 'default_fallback' };
 }
 
 function isInsideAdvanceWindow(cultDataHora: Date | null | undefined, advanceHours: number) {
@@ -526,8 +534,14 @@ export async function runBatchJob() {
             escalaCache.set(escalaKey, escala);
         }
 
-        if (!escala) continue;
-        if (!ELIGIBLE_ESCALA_STATUSES.has(String(escala.status || '').trim())) continue;
+        if (!escala) {
+            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_escala_not_found', churchId, escalaId: group.escalaId }));
+            continue;
+        }
+        if (!ELIGIBLE_ESCALA_STATUSES.has(String(escala.status || '').trim())) {
+            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_escala_status', churchId, escalaId: group.escalaId, status: escala.status }));
+            continue;
+        }
 
         const cultoId = String(escala.cultoId || '').trim();
         if (!cultoId) continue;
@@ -540,7 +554,10 @@ export async function runBatchJob() {
             cultCache.set(cultKey, culto);
         }
 
-        if (!culto) continue;
+        if (!culto) {
+            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_culto_not_found', churchId, escalaId: group.escalaId, cultoId }));
+            continue;
+        }
 
         const dataHoraCulto = parseIsoDate(culto.data);
         if (!isEventInFuture(dataHoraCulto)) {
@@ -554,9 +571,20 @@ export async function runBatchJob() {
             continue;
         }
 
-        const advanceHours = resolveAdvanceHours(config);
+        const resolution = resolveAdvanceHours(config);
+        const advanceHours = resolution.value;
+        
         if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) {
-            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_advance_window', churchId, escalaId: group.escalaId, cultoId, advanceHours }));
+            console.log(JSON.stringify({ 
+                ...buildLogMeta(), 
+                event: 'scheduler_skip_advance_window', 
+                churchId, 
+                escalaId: group.escalaId, 
+                cultoId, 
+                whatsappAutomation_raw: config,
+                resolution_source: resolution.source,
+                advanceHours 
+            }));
             continue;
         }
 
