@@ -11,6 +11,7 @@ import {
 import { sendBatchText, getInstanceStatus } from './evolution.js';
 import { selectSenderForChurch } from './pool.js';
 import { buildAutoMessage, formatarLocal, resolveEventLocation } from './messageBuilder.js';
+import { buildLogMeta } from '../utils/logger.js';
 
 const DEFAULT_IDLE_DELAY_MINUTES = 5;
 const DEFAULT_ACTIVE_DELAY_MINUTES = 1;
@@ -86,12 +87,14 @@ function isInsideSilenceWindow(silenceStart: string, silenceEnd: string, timeZon
     return currentMinutes >= startMinutes || currentMinutes <= endMinutes;
 }
 
-function resolveAdvanceHours(config: { advanceType?: string; advanceValue?: number; advanceHours?: number }): number {
-    if (config.advanceType && config.advanceValue != null) {
-        if (config.advanceType === 'days') return config.advanceValue * 24;
-        return config.advanceValue;
+function resolveAdvanceHours(config: { advanceType?: string; advanceValue?: string | number; advanceHours?: string | number }): number {
+    const val = config.advanceValue != null ? Number(config.advanceValue) : null;
+    if (config.advanceType && val != null && !Number.isNaN(val)) {
+        if (config.advanceType === 'days') return val * 24;
+        return val;
     }
-    return config.advanceHours || DEFAULT_ADVANCE_HOURS;
+    const legacy = config.advanceHours != null ? Number(config.advanceHours) : null;
+    return (legacy != null && !Number.isNaN(legacy)) ? legacy : DEFAULT_ADVANCE_HOURS;
 }
 
 function isInsideAdvanceWindow(cultDataHora: Date | null | undefined, advanceHours: number) {
@@ -350,7 +353,7 @@ export function createAdaptiveJobLoop(deps: AdaptiveLoopDeps, config: AdaptiveSc
             }
 
             deps.log(JSON.stringify({
-                timestamp: new Date().toISOString(),
+                ...buildLogMeta(),
                 event: 'scheduler_cycle_complete',
                 ...stats,
                 nextDelayMinutes
@@ -363,7 +366,7 @@ export function createAdaptiveJobLoop(deps: AdaptiveLoopDeps, config: AdaptiveSc
 
             const nextDelayMinutes = config.idleDelayMinutes;
             deps.log(JSON.stringify({
-                timestamp: new Date().toISOString(),
+                ...buildLogMeta(),
                 event: 'scheduler_cycle_complete',
                 fetchedItems: 0,
                 eligibleItems: 0,
@@ -447,7 +450,7 @@ async function monitorPool() {
             if (statusResult.status !== number.status) {
                 await updatePoolNumber(number.numberId, updates as any);
                 console.log(JSON.stringify({
-                    timestamp: new Date().toISOString(),
+                    ...buildLogMeta(),
                     event: 'pool_status_changed',
                     numberId: number.numberId,
                     instanceId: number.instanceId,
@@ -494,7 +497,7 @@ export async function runBatchJob() {
     for (const group of groupedItems.values()) {
         const church = churchMap.get(group.churchId);
         if (!church) {
-            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_church_disabled', churchId: group.churchId, escalaId: group.escalaId }));
+            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_church_disabled', churchId: group.churchId, escalaId: group.escalaId }));
             for (const itemDoc of group.itemDocs) {
                 const item = itemDoc.data();
                 if (item.notificadoErro !== 'church_disabled') {
@@ -511,7 +514,7 @@ export async function runBatchJob() {
         const silenceEnd = config.silenceEnd || DEFAULT_SILENCE_END;
 
         if (isInsideSilenceWindow(silenceStart, silenceEnd, timeZone)) {
-            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_silence_window', churchId, escalaId: group.escalaId, silenceStart, silenceEnd }));
+            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_silence_window', churchId, escalaId: group.escalaId, silenceStart, silenceEnd }));
             continue;
         }
 
@@ -541,7 +544,7 @@ export async function runBatchJob() {
 
         const dataHoraCulto = parseIsoDate(culto.data);
         if (!isEventInFuture(dataHoraCulto)) {
-            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_evento_passado', churchId, escalaId: group.escalaId, cultoId, dataCulto: culto.data }));
+            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_evento_passado', churchId, escalaId: group.escalaId, cultoId, dataCulto: culto.data }));
             for (const itemDoc of group.itemDocs) {
                 const item = itemDoc.data();
                 if (item.notificadoErro !== 'evento_passado') {
@@ -553,7 +556,7 @@ export async function runBatchJob() {
 
         const advanceHours = resolveAdvanceHours(config);
         if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) {
-            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_advance_window', churchId, escalaId: group.escalaId, cultoId, advanceHours }));
+            console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_advance_window', churchId, escalaId: group.escalaId, cultoId, advanceHours }));
             continue;
         }
 
@@ -642,7 +645,7 @@ export async function runBatchJob() {
         const sender = await selectSenderForChurch(churchId, pendingItems.length);
         if (!sender) {
             console.warn(JSON.stringify({
-                timestamp: new Date().toISOString(),
+                ...buildLogMeta(),
                 event: 'scheduler_no_sender',
                 churchId,
                 escalaId: group.escalaId,

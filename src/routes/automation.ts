@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getChurchWhatsappAutomation, db } from '../services/firestore.js';
 import { listConnectedPoolNumbers } from '../services/firestore.js';
+import { buildLogMeta } from '../utils/logger.js';
 
 const router = Router();
 
@@ -45,7 +46,7 @@ router.post('/register', async (req, res) => {
         if (resetPromises.length > 0) {
             await Promise.all(resetPromises);
             console.log(JSON.stringify({
-                timestamp: now.toISOString(),
+                ...buildLogMeta(now),
                 event: 'automation_register_items_reset',
                 churchId,
                 resetCount: resetPromises.length

@@ -5,6 +5,7 @@ import { validateEvolutionConfig } from './services/evolution.js';
 import { syncChurchConnectionStatus } from './services/connection-sync.js';
 import { requireApiKey } from './middleware/auth.js';
 import { requireAdminKey } from './middleware/adminAuth.js';
+import { buildLogMeta } from './utils/logger.js';
 import healthRouter from './routes/health.js';
 import sendRouter from './routes/send.js';
 import automationRouter from './routes/automation.js';
@@ -31,7 +32,7 @@ function createApp() {
     // Request logger
     app.use((req, _res, next) => {
         console.log(JSON.stringify({
-            timestamp: new Date().toISOString(),
+            ...buildLogMeta(),
             event: 'http_request',
             method: req.method,
             path: req.path

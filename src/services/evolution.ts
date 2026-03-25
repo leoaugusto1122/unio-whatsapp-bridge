@@ -1,4 +1,5 @@
 import { normalizePhoneDigits, PhoneValidationError } from '../utils/phone.js';
+import { buildLogMeta } from '../utils/logger.js';
 
 const DEFAULT_BATCH_MIN_DELAY_MS = 15_000;
 const DEFAULT_BATCH_MAX_DELAY_MS = 30_000;
@@ -290,7 +291,7 @@ export function sendPresenceComposing(instanceName: string, number: string, rand
     const delayMs = getPresenceDelayMs(randomFn);
 
     console.log(JSON.stringify({
-        timestamp: new Date().toISOString(),
+        ...buildLogMeta(),
         event: 'presence_sent',
         instanceId: instanceName,
         to: number,
