@@ -341,12 +341,12 @@ export function createAdaptiveJobLoop(deps: AdaptiveLoopDeps, config: AdaptiveSc
 
         try {
             const stats = await deps.executeBatchJob();
-            const nextDelayMinutes = stats.fetchedItems > 0
+            const nextDelayMinutes = stats.eligibleItems > 0
                 ? config.activeDelayMinutes
                 : config.idleDelayMinutes;
 
-            if (stats.fetchedItems === 0) {
-                deps.log('Nenhum item encontrado. Aguardando 5 min...');
+            if (stats.eligibleItems === 0) {
+                deps.log(`Nenhum item elegível (fetched=${stats.fetchedItems}). Aguardando ${config.idleDelayMinutes} min...`);
             }
 
             deps.log(JSON.stringify({
