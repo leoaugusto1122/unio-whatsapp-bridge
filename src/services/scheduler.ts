@@ -573,7 +573,7 @@ export async function runBatchJob() {
 
             if (!membroId) {
                 if (item.notificadoErro !== 'sem_telefone') {
-                    await itemDoc.ref.update({ notificado: false, notificadoErro: 'sem_telefone' });
+                    await itemDoc.ref.update({ notificado: true, notificadoErro: 'sem_telefone' });
                 }
                 continue;
             }
@@ -590,7 +590,12 @@ export async function runBatchJob() {
 
             const telefone = getPhoneFromMember(membro);
             if (!telefone) {
-                await updateNotificationError(itemDocs, 'sem_telefone');
+                for (const itemDoc of itemDocs) {
+                    const item = itemDoc.data();
+                    if (item.notificadoErro !== 'sem_telefone') {
+                        await itemDoc.ref.update({ notificado: true, notificadoErro: 'sem_telefone' });
+                    }
+                }
                 continue;
             }
 
