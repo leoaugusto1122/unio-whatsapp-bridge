@@ -495,6 +495,12 @@ export async function runBatchJob() {
         const church = churchMap.get(group.churchId);
         if (!church) {
             console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_church_disabled', churchId: group.churchId, escalaId: group.escalaId }));
+            for (const itemDoc of group.itemDocs) {
+                const item = itemDoc.data();
+                if (item.notificadoErro !== 'church_disabled') {
+                    await itemDoc.ref.update({ notificado: true, notificadoErro: 'church_disabled' });
+                }
+            }
             continue;
         }
 
@@ -534,7 +540,16 @@ export async function runBatchJob() {
         if (!culto) continue;
 
         const dataHoraCulto = parseIsoDate(culto.data);
-        if (!isEventInFuture(dataHoraCulto)) continue;
+        if (!isEventInFuture(dataHoraCulto)) {
+            console.log(JSON.stringify({ timestamp: new Date().toISOString(), event: 'scheduler_skip_evento_passado', churchId, escalaId: group.escalaId, cultoId, dataCulto: culto.data }));
+            for (const itemDoc of group.itemDocs) {
+                const item = itemDoc.data();
+                if (item.notificadoErro !== 'evento_passado') {
+                    await itemDoc.ref.update({ notificado: true, notificadoErro: 'evento_passado' });
+                }
+            }
+            continue;
+        }
 
         const advanceHours = resolveAdvanceHours(config);
         if (!isInsideAdvanceWindow(dataHoraCulto, advanceHours)) {

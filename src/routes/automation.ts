@@ -19,6 +19,38 @@ router.post('/register', async (req, res) => {
         await db.collection('igrejas').doc(churchId).update({
             'whatsappAutomation.enabled': true
         });
+
+        const now = new Date();
+        const disabledItems = await db.collectionGroup('items')
+            .where('notificadoErro', '==', 'church_disabled')
+            .get();
+
+        const resetPromises: Promise<unknown>[] = [];
+        for (const itemDoc of disabledItems.docs) {
+            const parts = itemDoc.ref.path.split('/');
+            if (parts[1] !== churchId) continue;
+
+            const item = itemDoc.data();
+            const dataCulto = item.dataCulto instanceof Date
+                ? item.dataCulto
+                : item.dataCulto?.toDate?.() ?? (typeof item.dataCulto === 'string' ? new Date(item.dataCulto) : null);
+
+            if (dataCulto && dataCulto.getTime() > now.getTime()) {
+                resetPromises.push(
+                    itemDoc.ref.update({ notificado: false, notificadoErro: null })
+                );
+            }
+        }
+
+        if (resetPromises.length > 0) {
+            await Promise.all(resetPromises);
+            console.log(JSON.stringify({
+                timestamp: now.toISOString(),
+                event: 'automation_register_items_reset',
+                churchId,
+                resetCount: resetPromises.length
+            }));
+        }
     }
 
     if (connected.length === 0) {
