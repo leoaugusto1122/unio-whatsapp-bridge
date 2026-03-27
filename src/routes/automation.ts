@@ -9,6 +9,15 @@ function getErrorMessage(error: unknown) {
     return error instanceof Error ? error.message : String(error);
 }
 
+function serializeError(error: any) {
+    return {
+        message: getErrorMessage(error),
+        code: String(error?.code || ''),
+        details: String(error?.details || ''),
+        stack: error?.stack || '',
+    };
+}
+
 async function setChurchAutomationEnabled(churchId: string, enabled: boolean) {
     if (!db) return;
 
@@ -87,7 +96,14 @@ router.post('/register', async (req, res) => {
                 ...buildLogMeta(),
                 event: 'automation_register_items_reset_error',
                 churchId,
-                message: getErrorMessage(error)
+                stage: 'query_or_reset',
+                query: {
+                    collectionGroup: 'items',
+                    field: 'notificadoErro',
+                    op: '==',
+                    value: 'church_disabled',
+                },
+                ...serializeError(error),
             }));
         });
 
@@ -124,7 +140,7 @@ router.post('/register', async (req, res) => {
             ...buildLogMeta(),
             event: 'automation_register_error',
             churchId,
-            message: getErrorMessage(error)
+            ...serializeError(error),
         }));
         res.status(500).json({
             error: 'automation_register_failed',
@@ -155,7 +171,7 @@ router.post('/unregister', async (req, res) => {
             ...buildLogMeta(),
             event: 'automation_unregister_error',
             churchId,
-            message: getErrorMessage(error)
+            ...serializeError(error),
         }));
         res.status(500).json({
             error: 'automation_unregister_failed',
@@ -193,7 +209,7 @@ router.get('/status/:churchId', async (req, res) => {
             ...buildLogMeta(),
             event: 'automation_status_error',
             churchId,
-            message: getErrorMessage(error)
+            ...serializeError(error),
         }));
         res.status(500).json({
             error: 'automation_status_failed',
