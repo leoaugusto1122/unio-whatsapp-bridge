@@ -60,9 +60,41 @@ export type PoolNumber = {
     antiBan: PoolNumberAntiBan;
 };
 
+type ChurchUsage = {
+    waSentThisMonth?: number;
+    waMonthKey?: string;
+    [key: string]: unknown;
+};
+
 function getChurchRef(churchId: string) {
     if (!db) return null;
     return db.collection('igrejas').doc(churchId);
+}
+
+export function getCurrentUsageMonthKey(now = new Date()) {
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    return `${year}-${month}`;
+}
+
+export function buildNextChurchWhatsappUsageState(
+    usage: ChurchUsage | null | undefined,
+    incrementBy = 1,
+    now = new Date()
+) {
+    const safeUsage = (usage && typeof usage === 'object') ? usage : {};
+    const currentMonthKey = getCurrentUsageMonthKey(now);
+    const storedMonthKey = String(safeUsage.waMonthKey || '').trim();
+    const currentCount = storedMonthKey === currentMonthKey
+        ? Math.max(0, Number(safeUsage.waSentThisMonth || 0))
+        : 0;
+    const nextIncrement = Math.max(0, Number(incrementBy || 0));
+
+    return {
+        ...safeUsage,
+        waSentThisMonth: currentCount + nextIncrement,
+        waMonthKey: currentMonthKey
+    };
 }
 
 export async function getChurchWhatsappAutomation(churchId: string): Promise<ChurchWhatsappAutomation | null> {
@@ -85,6 +117,40 @@ export async function updateChurchWhatsappConnected(churchId: string, connected:
     });
 
     return true;
+}
+
+export async function incrementChurchWhatsappUsage(churchId: string, incrementBy = 1, now = new Date()) {
+    if (!db) return false;
+
+    const churchRef = getChurchRef(churchId);
+    if (!churchRef) return false;
+
+    await db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(churchRef);
+        const currentData = snapshot.data() || {};
+        const nextUsage = buildNextChurchWhatsappUsageState(currentData.usage, incrementBy, now);
+
+        transaction.set(churchRef, {
+            usage: nextUsage
+        }, { merge: true });
+    });
+
+    return true;
+}
+
+export async function updateEscalaAllItemsNotificados(churchId: string, escalaId: string) {
+    if (!db) return false;
+
+    const escalaRef = db.collection(`igrejas/${churchId}/escalas`).doc(escalaId);
+    const itemsSnapshot = await escalaRef.collection('items').get();
+    const allItemsNotificados = !itemsSnapshot.empty
+        && itemsSnapshot.docs.every(doc => doc.data()?.notificado === true);
+
+    await escalaRef.set({
+        allItemsNotificados
+    }, { merge: true });
+
+    return allItemsNotificados;
 }
 
 export async function listEnabledChurches(): Promise<ChurchDoc[]> {

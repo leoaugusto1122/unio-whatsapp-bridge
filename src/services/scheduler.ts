@@ -6,7 +6,9 @@ import {
     listPoolNumbers,
     updatePoolNumber,
     resetDailyMessageCounts,
-    incrementNumberMessageCount
+    incrementNumberMessageCount,
+    incrementChurchWhatsappUsage,
+    updateEscalaAllItemsNotificados
 } from './firestore.js';
 import { sendBatchText, getInstanceStatus } from './evolution.js';
 import { selectSenderForChurch } from './pool.js';
@@ -442,6 +444,20 @@ export function startScheduler() {
     }, { timezone: timeZone } as any);
 }
 
+async function refreshEscalaNotificationSummary(churchId: string, escalaId: string) {
+    try {
+        await updateEscalaAllItemsNotificados(churchId, escalaId);
+    } catch (error) {
+        console.error(JSON.stringify({
+            ...buildLogMeta(),
+            event: 'scheduler_update_escala_summary_error',
+            churchId,
+            escalaId,
+            message: error instanceof Error ? error.message : String(error)
+        }));
+    }
+}
+
 async function monitorPool() {
     const numbers = await listPoolNumbers();
     for (const number of numbers) {
@@ -503,6 +519,7 @@ export async function runBatchJob() {
     const memberCache = new Map<string, FirebaseFirestore.DocumentData | null>();
 
     for (const group of groupedItems.values()) {
+        let shouldRefreshEscalaSummary = false;
         const church = churchMap.get(group.churchId);
         if (!church) {
             console.log(JSON.stringify({ ...buildLogMeta(), event: 'scheduler_skip_church_disabled', churchId: group.churchId, escalaId: group.escalaId }));
@@ -510,7 +527,11 @@ export async function runBatchJob() {
                 const item = itemDoc.data();
                 if (item.notificadoErro !== 'church_disabled') {
                     await itemDoc.ref.update({ notificado: true, notificadoErro: 'church_disabled' });
+                    shouldRefreshEscalaSummary = true;
                 }
+            }
+            if (shouldRefreshEscalaSummary) {
+                await refreshEscalaNotificationSummary(group.churchId, group.escalaId);
             }
             continue;
         }
@@ -566,7 +587,11 @@ export async function runBatchJob() {
                 const item = itemDoc.data();
                 if (item.notificadoErro !== 'evento_passado') {
                     await itemDoc.ref.update({ notificado: true, notificadoErro: 'evento_passado' });
+                    shouldRefreshEscalaSummary = true;
                 }
+            }
+            if (shouldRefreshEscalaSummary) {
+                await refreshEscalaNotificationSummary(churchId, group.escalaId);
             }
             continue;
         }
@@ -605,6 +630,7 @@ export async function runBatchJob() {
             if (!membroId) {
                 if (item.notificado !== true || item.notificadoErro !== 'sem_telefone') {
                     await itemDoc.ref.update({ notificado: true, notificadoErro: 'sem_telefone' });
+                    shouldRefreshEscalaSummary = true;
                 }
                 continue;
             }
@@ -625,6 +651,7 @@ export async function runBatchJob() {
                     const item = itemDoc.data();
                     if (item.notificado !== true || item.notificadoErro !== 'sem_telefone') {
                         await itemDoc.ref.update({ notificado: true, notificadoErro: 'sem_telefone' });
+                        shouldRefreshEscalaSummary = true;
                     }
                 }
                 continue;
@@ -634,6 +661,7 @@ export async function runBatchJob() {
             const tokenId = String(primeiroItemComToken?.data()?.tokenId || '').trim();
             if (!tokenId) {
                 await updateNotificationError(itemDocs, 'send_error');
+                shouldRefreshEscalaSummary = true;
                 continue;
             }
 
@@ -694,6 +722,7 @@ export async function runBatchJob() {
 
                 if (sendResult.status === 'sent') {
                     await incrementNumberMessageCount(sender.numberId);
+                    await incrementChurchWhatsappUsage(churchId, 1);
                     for (const docRef of docRefs) {
                         await docRef.update({
                             notificado: true,
@@ -702,6 +731,7 @@ export async function runBatchJob() {
                         });
                     }
 
+                    shouldRefreshEscalaSummary = true;
                     stats.processedItems += docRefs.length;
                     continue;
                 }
@@ -715,9 +745,14 @@ export async function runBatchJob() {
                 for (const docRef of docRefs) {
                     await docRef.update({ notificado: false, notificadoErro: mappedError });
                 }
+                shouldRefreshEscalaSummary = true;
             }
         } catch (error) {
             console.error(`Error sending batch for church ${churchId} escala ${group.escalaId}:`, error);
+        } finally {
+            if (shouldRefreshEscalaSummary) {
+                await refreshEscalaNotificationSummary(churchId, group.escalaId);
+            }
         }
     }
 
@@ -725,7 +760,6 @@ export async function runBatchJob() {
 
     return stats;
 }
-
 
 
 

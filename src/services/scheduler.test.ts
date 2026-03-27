@@ -259,7 +259,7 @@ test('adaptive loop uses idle delay and emits empty-state logs when nothing is f
 
     assert.equal(nextDelay, 5);
     assert.equal(timers[0], 300000);
-    assert.equal(logs[0], 'Nenhum item encontrado. Aguardando 5 min...');
+    assert.equal(logs[0], 'Nenhum item elegível (fetched=0). Aguardando 5 min...');
     assert.match(logs[1], /"fetchedItems":0/);
     assert.match(logs[1], /"filterMode":"createdAt"/);
     assert.match(logs[1], /"nextDelayMinutes":5/);
