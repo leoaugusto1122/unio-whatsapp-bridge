@@ -33,6 +33,7 @@ export type MessageParams = {
     token: string;
     location?: EventLocation | null;
     segmento?: string | null;
+    telefoneResponsavel?: string;
     now?: Date;
     randomFn?: () => number;
 };
@@ -110,32 +111,15 @@ export function resolveEventLocation(culto: unknown, igreja: unknown): EventLoca
     return null;
 }
 
-function formatLocationBlock(location?: EventLocation | null): string {
+function getLocationMapsUrl(location?: EventLocation | null): string | null {
     const resolved = getValidLocation(location);
-    if (resolved?.lat == null || resolved?.lng == null) return '';
-
-    const mapsUrl = buildMapsUrl(resolved.lat, resolved.lng);
-    const address = resolved.formatted_address || '';
-    const label = resolved.name
-        ? address
-            ? `${resolved.name} - ${address}`
-            : resolved.name
-        : address;
-
-    if (!label) {
-        return `\n📍 ${mapsUrl}`;
-    }
-
-    return `\n*Local:* ${label}\n📍 ${mapsUrl}`;
+    if (resolved?.lat == null || resolved?.lng == null) return null;
+    return buildMapsUrl(resolved.lat, resolved.lng);
 }
 
 export function buildAutoMessage(params: MessageParams): string {
     const timeZone = getTimeZone();
-    const greeting = resolveGreeting(params.segmento, {
-        now: params.now,
-        randomFn: params.randomFn,
-        timeZone
-    });
+    const normalized = normalizeSegmento(params.segmento);
 
     const diaSemana = capitalizeFirst(
         params.dataHoraCulto.toLocaleDateString('pt-BR', { weekday: 'long', timeZone })
@@ -149,23 +133,52 @@ export function buildAutoMessage(params: MessageParams): string {
     });
 
     const linkConfirmacao = `https://unioescala.web.app/confirmar?token=${params.token}`;
-    const locationBlock = formatLocationBlock(params.location);
+    const mapsUrl = getLocationMapsUrl(params.location);
+    const telefone = params.telefoneResponsavel?.trim() || '';
+    const phoneBlock = telefone ? `\n📞 ${telefone}` : '';
+    const dataHora = `${diaSemana}, ${data} às ${horario}`;
 
-    return `${greeting} *${params.nomeDoMembro}*.
+    if (normalized === 'igreja') {
+        const locationBlock = mapsUrl ? `\n\n📍 *Local do culto:*\n${mapsUrl}` : '';
+        return `Olá, *${params.nomeDoMembro}*! 🙌
 
-Você está escalado(a) para:
+Você está escalado(a) para o próximo culto:
+
 🏛 *${params.nomeIgreja}*
-*EVENTO:* ${params.nomeCulto}
-*ESCALA:* ${params.nomeEscala}
+🎉 *Evento:* ${params.nomeCulto}
+📅 *${dataHora}*
 
-*Data:* ${diaSemana}, ${data}
-*Horário:* ${horario}
-*Função:* ${params.local}
+🧩 *Escalação:*
+${params.local}
 
-✅ *Confirme sua presença pelo link abaixo:*
+👉 Confirme em menos de 10 segundos:
 ${linkConfirmacao}${locationBlock}
 
-Obrigado!`;
+⚠️ Este número é automático e não recebe respostas.
+Dúvidas? Procure o responsável pela escala.${phoneBlock}
+
+Deus abençoe! 🙏`;
+    }
+
+    const locationBlock = mapsUrl ? `\n\n📍 *Local do evento:*\n${mapsUrl}` : '';
+    return `Olá, *${params.nomeDoMembro}*!
+
+Você está escalado(a) para o próximo evento:
+
+🏢 *${params.nomeIgreja}*
+🎉 *Evento:* ${params.nomeCulto}
+📅 *${dataHora}*
+
+🧩 *Escalação:*
+${params.local}
+
+👉 Confirme em menos de 10 segundos:
+${linkConfirmacao}${locationBlock}
+
+⚠️ Este número é automático e não recebe respostas.
+Dúvidas? Entre em contato com o responsável.${phoneBlock}
+
+Obrigado.`;
 }
 
 export function formatarLocal(item: Record<string, unknown>): string {
@@ -174,7 +187,7 @@ export function formatarLocal(item: Record<string, unknown>): string {
     const funcao = String(item?.funcaoNaEscala || '').trim();
 
     if (corredor && corredor !== setor) {
-        return `${setor} (${corredor})`;
+        return `${setor} → ${corredor}`;
     }
 
     if (setor) return setor;

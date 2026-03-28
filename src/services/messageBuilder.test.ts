@@ -92,21 +92,24 @@ test('buildAutoMessage keeps the body and confirmation link while varying the gr
 
     assert.equal(
         message,
-        `Olá, irmão *Nome*.
+        `Olá, *Nome*! 🙌
 
-Você está escalado(a) para:
+Você está escalado(a) para o próximo culto:
+
 🏛 *Igreja*
-*EVENTO:* Culto
-*ESCALA:* Escala
+🎉 *Evento:* Culto
+📅 *Domingo, 22/03/2026 às 19:00*
 
-*Data:* Domingo, 22/03/2026
-*Horário:* 19:00
-*Função:* Louvor
+🧩 *Escalação:*
+Louvor
 
-✅ *Confirme sua presença pelo link abaixo:*
+👉 Confirme em menos de 10 segundos:
 https://unioescala.web.app/confirmar?token=TOKEN
 
-Obrigado!`
+⚠️ Este número é automático e não recebe respostas.
+Dúvidas? Procure o responsável pela escala.
+
+Deus abençoe! 🙏`
     );
 });
 
@@ -131,7 +134,7 @@ test('buildAutoMessage puts location block after confirmation link', () => {
 
     assert.match(
         message,
-        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\*Local:\* Sitio Primavera - Rod\. PR-317, Km 12, Maringa - PR\n📍 https:\/\/maps\.google\.com\/\?q=-23\.4,-51\.9/
+        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\n📍 \*Local do culto:\*\nhttps:\/\/maps\.google\.com\/\?q=-23\.4,-51\.9/
     );
 });
 
@@ -152,7 +155,7 @@ test('buildAutoMessage appends church location block when fallback location is u
 
     assert.match(
         message,
-        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\*Local:\* Rua da Sede, 123\n📍 https:\/\/maps\.google\.com\/\?q=-23\.5,-52/
+        /https:\/\/unioescala\.web\.app\/confirmar\?token=TOKEN\n\n📍 \*Local do culto:\*\nhttps:\/\/maps\.google\.com\/\?q=-23\.5,-52/
     );
 });
 
