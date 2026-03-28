@@ -684,7 +684,7 @@ export async function runBatchJob() {
                 token: tokenId,
                 location,
                 segmento: churchData.segmento,
-                telefoneResponsavel: String(churchData.telefoneResponsavel || churchData.telefone || '').trim()
+                telefoneResponsavel: String(churchData.whatsapp || '').trim()
             });
 
             pendingItems.push({
